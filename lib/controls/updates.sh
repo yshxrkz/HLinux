@@ -110,6 +110,12 @@ fix_auto_updates() {
             act_note "unattended-upgrades installs security updates by default; see /etc/apt/apt.conf.d/50unattended-upgrades (e.g. Automatic-Reboot)"
             ;;
         rhel)
+            # dnf-automatic runs from a systemd timer; without systemd stop
+            # before changing anything rather than half-configure it.
+            if ! has_systemd; then
+                step manual "dnf-automatic runs from a systemd timer, and this system does not run systemd"
+                return "$RC_MANUAL"
+            fi
             act_pkg_install dnf-automatic || return
             # dnf4 ships a timer that downloads AND installs; otherwise turn
             # on apply_updates for the generic timer.

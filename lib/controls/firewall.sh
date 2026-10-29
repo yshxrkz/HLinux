@@ -120,6 +120,10 @@ fix_firewall() {
             fi
             ;;
         rhel|suse)
+            if ! has_systemd; then
+                step manual "firewalld is managed by systemd, and this system does not run systemd"
+                return "$RC_MANUAL"
+            fi
             act_pkg_install firewalld || return
             act_service_enable firewalld || return
             if ((ssh_installed)) && [[ $port != 22 ]]; then
