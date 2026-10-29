@@ -8,6 +8,13 @@
 # 2. Local password policy
 # ---------------------------------------------------------------------------
 
+register_control AUTH-1 medium "Password policy" fix_password_ageing \
+    "Password ageing policy is set" \
+    "A maximum age limits how long a stolen password stays useful; a minimum age stops users from cycling straight back to their old password; a warning period avoids surprise lockouts."
+register_control AUTH-2 high "Password policy" fix_empty_passwords \
+    "No accounts have empty or unshadowed passwords" \
+    "An account with an empty password can be used by anyone with console or local access. A password hash left in world-readable /etc/passwd can be copied by any user and cracked offline."
+
 login_defs_value() {
     local key=$1 line
     [[ -r /etc/login.defs ]] || return 0

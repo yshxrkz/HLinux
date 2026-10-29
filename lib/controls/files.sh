@@ -8,6 +8,19 @@
 # 5. Permissions on account files
 # ---------------------------------------------------------------------------
 
+register_control FILE-1 high "File permissions" fix_file_perms \
+    "/etc/passwd has safe permissions" \
+    "If anyone but root can write /etc/passwd, they can add a UID 0 account or change another user's shell - instant root."
+register_control FILE-2 high "File permissions" fix_file_perms \
+    "/etc/shadow has safe permissions" \
+    "/etc/shadow holds every password hash. If ordinary users can read it, they can crack the hashes offline at their leisure."
+register_control FILE-3 medium "File permissions" fix_file_perms \
+    "/etc/group has safe permissions" \
+    "Write access to /etc/group lets a user add themselves to sudo, wheel or docker - a direct path to root."
+register_control FILE-4 medium "File permissions" fix_file_perms \
+    "/etc/gshadow has safe permissions" \
+    "/etc/gshadow holds group password hashes and group administrator lists; it should be as protected as /etc/shadow."
+
 # check_file_perms ID PATH MAX_MODE OWNER ALLOWED_GROUPS FIX_GROUP FIX_MODE WHY
 check_file_perms() {
     local id=$1 path=$2 max=$3 owner=$4 groups=$5 fix_group=$6 fix_mode=$7 why=$8

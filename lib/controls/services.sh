@@ -8,6 +8,10 @@
 # 4. Unnecessary / insecure services
 # ---------------------------------------------------------------------------
 
+register_control SVC-1 medium Services fix_services \
+    "No unnecessary or insecure services are running" \
+    "Every listening daemon is attack surface. Legacy protocols such as telnet, FTP and rsh also send credentials in cleartext, and services like Avahi or CUPS are rarely needed on a server."
+
 # Format: "description|systemd units|process names (fallback without systemd)"
 readonly SERVICES=(
     "Telnet server (cleartext logins)|telnet.socket telnetd.service inetutils-telnetd.service|telnetd in.telnetd"

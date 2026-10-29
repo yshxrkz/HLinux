@@ -8,6 +8,16 @@
 # 1. SSH server configuration
 # ---------------------------------------------------------------------------
 
+register_control SSH-1 high SSH fix_ssh_root_login \
+    "SSH root login is disabled" \
+    "Root is the one account every attacker knows exists, and it has unlimited power. Making admins log in as themselves and use sudo leaves an audit trail of who did what, and a leaked root key or password is no longer enough on its own."
+register_control SSH-2 high SSH fix_ssh_password_auth \
+    "SSH password authentication is disabled" \
+    "Internet-facing SSH servers see constant password-guessing attacks. Key-based logins cannot realistically be brute-forced and are not affected by password reuse from other breaches."
+register_control SSH-3 high SSH fix_ssh_empty_passwords \
+    "SSH does not allow empty passwords" \
+    "With PermitEmptyPasswords enabled, any account without a password is a remote shell for anyone who guesses the user name."
+
 declare -A SSHD=()
 SSHD_SOURCE=""
 

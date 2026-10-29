@@ -8,6 +8,10 @@
 # 6. Automatic security updates
 # ---------------------------------------------------------------------------
 
+register_control UPD-1 high Updates fix_auto_updates \
+    "Automatic security updates are enabled" \
+    "Most real-world compromises exploit vulnerabilities that already have a patch. Unattended security updates close that window within a day instead of whenever someone remembers to log in."
+
 apt_periodic() {
     apt-config dump 2>/dev/null | sed -n "s/^APT::Periodic::$1 \"\(.*\)\";\$/\1/p" | tail -n 1
 }

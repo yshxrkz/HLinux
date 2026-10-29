@@ -8,6 +8,10 @@
 # 3. Host firewall
 # ---------------------------------------------------------------------------
 
+register_control FW-1 high Firewall fix_firewall \
+    "A host firewall is active" \
+    "A default-deny firewall means a service that is installed or misconfigured later is not automatically reachable from the network. It is a second line of defence behind 'only run what you need'."
+
 check_firewall() {
     section "3. Firewall"
     local found=() notes=() out cmd
