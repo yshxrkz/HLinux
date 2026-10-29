@@ -32,6 +32,13 @@ FIX=$(mktemp -d)
 chmod 755 "$FIX"
 trap 'rm -rf "$FIX"' EXIT
 
+# A world-readable copy of the tool for the tests that run as "nobody": the
+# checkout itself may live under a home directory other users cannot enter.
+mkdir "$FIX/tool"
+cp -r "$(dirname "$AUDIT")/harden-audit.sh" "$(dirname "$AUDIT")/lib" "$FIX/tool/"
+chmod -R a+rX "$FIX/tool"
+AUDIT_ANYONE="$FIX/tool/harden-audit.sh"
+
 ok()   { PASSED=$((PASSED + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAILED=$((FAILED + 1)); printf '  FAIL  %s\n' "$1"; }
 
@@ -56,7 +63,7 @@ run_in_ns() {
         if [[ '"$user"' == root ]]; then
             "'"$AUDIT"'" --no-color
         else
-            su -s /bin/bash '"$user"' -c "\"'"$AUDIT"'\" --no-color"
+            su -s /bin/bash '"$user"' -c "\"'"$AUDIT_ANYONE"'\" --no-color"
         fi
         echo "EXIT=$?"
     ' 2>&1
@@ -196,7 +203,12 @@ mounts=""
 out=$(run_in_ns "$mounts" nobody)
 expect "header warns about non-root"    "$out" 'not root: some checks will be SKIPPED'
 expect "AUTH-2 skipped without shadow"  "$out" '^\[SKIP\] AUTH-2 '
-if [[ -n $mounts ]] && command -v ufw >/dev/null; then
+# With systemd the audit also requires the ufw service to be active.
+ufw_service_ok=1
+if [[ -d /run/systemd/system ]] && ! systemctl is-active --quiet ufw 2>/dev/null; then
+    ufw_service_ok=0
+fi
+if [[ -n $mounts ]] && command -v ufw >/dev/null && ((ufw_service_ok)); then
     expect "FW-1 passes from ufw.conf"  "$out" '^\[PASS\] FW-1 .*'
     expect "FW-1 explains ufw.conf"     "$out" 'ENABLED=yes in /etc/ufw/ufw.conf'
 fi
@@ -269,11 +281,11 @@ rc=$?
 if ((rc == 0)); then ok "harden --dry-run exits 0"; else fail "harden --dry-run exits 0 (got $rc)"; fi
 expect "dry run says so"                     "$out" 'DRY RUN \(nothing will be changed\)'
 expect "dry run ends with a summary"         "$out" '^Dry run: nothing was changed\.'
-out=$(su -s /bin/bash nobody -c "\"$AUDIT\" harden --no-color" 2>&1)
+out=$(su -s /bin/bash nobody -c "\"$AUDIT_ANYONE\" harden --no-color" 2>&1)
 rc=$?
 if ((rc == 2)); then ok "harden as non-root is refused"; else fail "harden as non-root is refused (got $rc)"; fi
 expect "non-root refusal points to --dry-run" "$out" 'harden --dry-run'
-out=$(su -s /bin/bash nobody -c "\"$AUDIT\" harden --dry-run --no-color" 2>&1)
+out=$(su -s /bin/bash nobody -c "\"$AUDIT_ANYONE\" harden --dry-run --no-color" 2>&1)
 rc=$?
 if ((rc == 0)); then ok "harden --dry-run works without root"; else fail "harden --dry-run works without root (got $rc)"; fi
 out=$("$AUDIT" harden --only SSH-3 --no-color < /dev/null 2>&1)
