@@ -57,7 +57,7 @@ quote_cmd() {
         if [[ $a =~ ^[A-Za-z0-9_./:=@%+,-]+$ ]]; then
             out+=" $a"
         else
-            out+=" $(printf '%q' "$a")"
+            out+=" '${a//\'/\'\\\'\'}'"
         fi
     done
     printf '%s' "${out# }"
