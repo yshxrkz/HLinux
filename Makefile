@@ -27,8 +27,10 @@ test-docker:
 
 demo:
 	docker build --tag $(IMAGE) .
-	mkdir -p reports && chmod 777 reports
+	mkdir -p reports
 	docker run --rm -it --cap-add NET_ADMIN --volume "$(CURDIR)/reports:/reports" $(IMAGE)
+	@# The reports are written by the container's root with mode 600.
+	docker run --rm --volume "$(CURDIR)/reports:/reports" --entrypoint chown $(IMAGE) -R "$$(id -u):$$(id -g)" /reports
 
 audit:
 	mkdir -p reports

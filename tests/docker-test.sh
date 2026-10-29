@@ -15,11 +15,17 @@ image=${IMAGE:-harden-audit-demo}
 reports=${1:-$root/reports}
 
 mkdir -p "$reports"
-# The container's root writes the reports; let the invoking user read them.
-chmod 777 "$reports"
 
 echo "Building $image ..."
 docker build --quiet --tag "$image" "$root" >/dev/null
+
+# Reports are written by the container's root with mode 600. Give them back
+# to whoever ran this script, even if the tests fail.
+give_back_reports() {
+    docker run --rm --volume "$reports:/reports" --entrypoint chown "$image" \
+        -R "$(id -u):$(id -g)" /reports
+}
+trap give_back_reports EXIT
 
 echo "Running the end-to-end tests in a fresh container ..."
 docker run --rm --cap-add NET_ADMIN --volume "$reports:/reports" "$image" \

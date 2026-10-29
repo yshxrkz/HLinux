@@ -24,7 +24,7 @@ jobs:
     name: Lint (shellcheck, hadolint, actionlint)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -34,20 +34,20 @@ jobs:
           shellcheck harden-audit.sh lib/*.sh lib/controls/*.sh tests/*.sh docker/*.sh
 
       - name: Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
 
       - name: actionlint
         run: |
-          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
           ./actionlint -color
 
   host-tests:
     name: Host tests (read-only)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -67,9 +67,12 @@ jobs:
           rc=0
           sudo ./harden-audit.sh audit --report reports/runner-audit.html || rc=$?
           sudo ./harden-audit.sh harden --dry-run --no-color | tee reports/runner-dry-run.txt
+          # Reports are written mode 600 as root; hand them to the runner user
+          # so the artifact upload can read them.
+          sudo chown -R "$(id -u):$(id -g)" reports
           test "$rc" -le 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: runner-audit
@@ -80,7 +83,7 @@ jobs:
     name: End-to-end tests in the Ubuntu demo container
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -94,7 +97,7 @@ jobs:
             cat reports/after.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: demo-reports
