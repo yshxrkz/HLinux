@@ -1,122 +1,234 @@
-# HLinux
+# HLinux: Linux hardening audit and hardening tool
 
-Linux hardening audit script.
+[![CI](https://github.com/yshxrkz/HLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/yshxrkz/HLinux/actions/workflows/ci.yml)
 
-`harden-audit.sh` checks a Linux host against a small hardening checklist,
-loosely based on the CIS Benchmarks. Each check prints **PASS** or **FAIL**
-with an explanation, and every FAIL comes with a suggested fix.
+`harden-audit.sh` checks a Linux server against 17 hardening controls modelled on the
+[CIS Benchmarks](https://www.cisecurity.org/cis-benchmarks). It covers SSH configuration,
+password policy, the host firewall, unnecessary services, account-file permissions,
+automatic updates and auditd. Each control gets **PASS**, **FAIL** or **SKIP**, with an
+explanation of what was found, why it matters and how to fix it. The results add up to a
+weighted **hardening score** (0 to 100, graded A to F), which you can also export as a
+Markdown, HTML or JSON report.
 
-The script is **strictly read-only**: it only inspects. It never changes the
-system. All fixes are printed for you to review and apply yourself.
+It has two modes:
 
-## Quick start
+- **`audit`** is strictly read-only. It never changes the system, and that is verified by
+  tracing its system calls in the tests.
+- **`harden`** fixes what failed. For every control it first shows the exact plan (commands,
+  plus the full content of any file it writes), then applies it **only after you confirm**.
+  `--dry-run` shows every plan and changes nothing. Every file is backed up before it is
+  touched, and SSH changes are validated with `sshd -t` and rolled back if sshd rejects them.
+
+It is plain Bash with no dependencies beyond what a server already has. It is tested
+end-to-end on Ubuntu 24.04 and smoke-tested on Rocky Linux 9.
+
+> [!WARNING]
+> **Try `harden` on a virtual machine or a snapshot first, never straight on a server you
+> care about.** It changes SSH, PAM, firewall, service and package configuration. It has
+> safety checks against locking you out and keeps backups, but a firewall or SSH change can
+> still cut off access in ways no script can foresee: a custom port forward, a management
+> agent, a second SSH daemon. Start with `audit` and `harden --dry-run`, read the plan, and
+> keep a console (not just SSH) open the first time you apply it.
+
+![HTML report of the insecure demo container: score 13/100, grade F](docs/images/report-before.png)
+
+## Contents
+
+- [Quick start: the safe demo](#quick-start-the-safe-demo)
+- [Install and usage](#install-and-usage)
+- [What it checks, and why](#what-it-checks-and-why)
+- [How hardening works](#how-hardening-works)
+- [Example output](#example-output)
+- [Reports and the hardening score](#reports-and-the-hardening-score)
+- [The read-only guarantee](#the-read-only-guarantee)
+- [Testing and CI](#testing-and-ci)
+- [Project layout](#project-layout)
+- [Limitations](#limitations)
+- [What I learned](#what-i-learned)
+
+## Quick start: the safe demo
+
+The repository includes a deliberately insecure Ubuntu 24.04 container: root can log in with
+a password, an account has no password, `/etc/shadow` is world-readable, an FTP server is
+running, and there is no firewall, no automatic updates and no auditd. It is the safe place
+to see what the tool does.
 
 ```bash
-sudo ./harden-audit.sh            # full audit
-sudo ./harden-audit.sh --quiet    # only show FAIL/SKIP results and the summary
-./harden-audit.sh                 # works without root too, but some checks are SKIPPED
+git clone https://github.com/yshxrkz/HLinux.git
+cd HLinux
+make demo        # or: docker build -t harden-audit-demo . && docker run --rm -it --cap-add NET_ADMIN harden-audit-demo
 ```
 
-| Option            | Meaning                                                     |
-|-------------------|-------------------------------------------------------------|
-| `-q`, `--quiet`   | Print only FAIL and SKIP results (plus the summary)         |
-| `--no-color`      | Disable coloured output (`NO_COLOR=1` also works)           |
-| `-h`, `--help`    | Show help                                                   |
-| `-V`, `--version` | Show version                                                |
+The demo audits the container, hardens it with `--yes`, and audits it again, going from
+**13/100 (F)** to **100/100 (A)**. With `make demo`, the reports land in `./reports/`.
+To explore by hand instead:
 
-**Exit status:** `0` = no check failed, `1` = at least one check failed,
-`2` = invalid option. You can use it in cron jobs, CI or configuration
-management, e.g. `sudo ./harden-audit.sh --quiet || alert-admins`.
+```bash
+docker run --rm -it --cap-add NET_ADMIN harden-audit-demo bash
+harden-audit audit
+harden-audit harden --dry-run
+harden-audit harden          # asks before every change
+```
 
-**Requirements:** bash 4+, coreutils, awk, grep, sed. Optional tools are used
-when present: `sshd`, `systemctl`, `nft`, `iptables`, `ufw`, `apt-config`,
-`dpkg-query`.
+`NET_ADMIN` lets ufw load firewall rules inside the container's own network namespace.
+The container is insecure on purpose: don't publish its ports or run it on a network you
+care about.
 
-## What is checked
+## Install and usage
 
-| ID     | Check | Passes when | CIS topic |
-|--------|-------|-------------|-----------|
-| SSH-1  | SSH root login disabled | `PermitRootLogin no`, and no `Match` block turns it back on | SSH server configuration |
-| SSH-2  | SSH password authentication disabled | `PasswordAuthentication no`, keyboard-interactive is not a password backdoor via PAM, and no `Match` block re-enables passwords | SSH server configuration |
-| SSH-3  | SSH does not allow empty passwords | `PermitEmptyPasswords no` | SSH server configuration |
-| AUTH-1 | Password ageing policy | `/etc/login.defs`: `PASS_MAX_DAYS` ≤ 365, `PASS_MIN_DAYS` ≥ 1, `PASS_WARN_AGE` ≥ 7 | Shadow password suite parameters |
-| AUTH-2 | No empty or unshadowed passwords | No empty password field in `/etc/passwd` or `/etc/shadow`, and no hashes in `/etc/passwd` | Local user and group settings |
-| FW-1   | Host firewall active | ufw enabled, firewalld running, or an nftables/iptables input chain that drops/rejects traffic | Host based firewall |
-| SVC-1  | No unnecessary services running | None of 19 legacy or rarely needed services is active: telnet, rsh/rlogin/rexec, TFTP, FTP, (x)inetd, talk, NIS, Avahi, CUPS, rpcbind, NFS, Samba, SNMP, LDAP, DHCP, DNS, Dovecot, Squid, rsyncd | Special purpose services |
-| FILE-1 | `/etc/passwd` permissions | mode 644 or stricter, `root:root` | System file permissions |
-| FILE-2 | `/etc/shadow` permissions | mode 640 or stricter, `root:root` or `root:shadow` | System file permissions |
-| FILE-3 | `/etc/group` permissions | mode 644 or stricter, `root:root` | System file permissions |
-| FILE-4 | `/etc/gshadow` permissions | mode 640 or stricter, `root:root` or `root:shadow` | System file permissions |
-| UPD-1  | Automatic security updates | **Debian/Ubuntu:** `unattended-upgrades` installed, `APT::Periodic::Update-Package-Lists` and `Unattended-Upgrade` enabled, and `apt-daily-upgrade.timer` enabled. **RHEL/Fedora/Rocky/Alma:** `dnf-automatic-install.timer` enabled, or `dnf-automatic`/`yum-cron` enabled with `apply_updates = yes` | Software updates |
+**Requirements:** Linux with Bash 4.4+ and the usual base tools (coreutils, grep, sed, awk).
+It uses `sshd`, `systemctl`, `ufw`, `firewall-cmd`, `nft`, `apt-config`/`dpkg-query` or
+`rpm` when they are present. Run it as root for complete results. Without root, checks it
+cannot perform are reported as SKIP instead of guessed.
 
-Each result is one of:
+```bash
+git clone https://github.com/yshxrkz/HLinux.git
+cd HLinux
+sudo ./harden-audit.sh                                   # audit (the default command)
 
-- **PASS**: the setting matches the checklist.
-- **FAIL**: it does not. The `Detail:` line says what was found and why it
-  matters, and the `Fix:` line gives commands to fix it.
-- **SKIP**: the check could not be evaluated. This usually means the script is
-  not running as root, or the distribution is not supported for that check.
-  SKIPs do not change the exit status.
+# optional: install as a command
+sudo ln -s "$PWD/harden-audit.sh" /usr/local/bin/harden-audit
+```
 
-The fix commands match your distribution family. For example, they suggest
-`ufw` on Debian/Ubuntu and `firewalld` on RHEL-likes, `systemctl reload ssh`
-or `sshd`, and `root:shadow 0640` or `root:root 0000` for `/etc/shadow`.
+| Command | What it does |
+|---|---|
+| `harden-audit.sh [audit]` | Check every control, print PASS/FAIL/SKIP and the score. Read-only. |
+| `harden-audit.sh harden` | Fix failing controls, asking before each one. Needs root. |
+| `harden-audit.sh list` | List the controls with severity, category and whether they can be fixed automatically. |
 
-### How the SSH checks work
+| Option | Applies to | Meaning |
+|---|---|---|
+| `-q`, `--quiet` | audit | Only print FAIL and SKIP results, plus the summary |
+| `-r`, `--report FILE` | audit, harden | Also write a report. The format comes from the extension (`.md`, `.html`, `.json`) |
+| `--format md\|html\|json` | audit, harden | Report format, if the file name doesn't say |
+| `--no-color` | all | No ANSI colours (`NO_COLOR=1` works too) |
+| `-n`, `--dry-run` | harden | Show every planned change and change nothing. Works without root. |
+| `-y`, `--yes` | harden | Apply every fix without asking (automation, demo) |
+| `--only IDS` | harden | Only these controls, e.g. `--only SSH-1,FW-1` |
+| `--skip IDS` | harden | Never touch these controls, e.g. `--skip SVC-1` |
+| `--force` | harden | Override the SSH lock-out safety checks (see below) |
 
-As root, the script asks `sshd -T` for sshd's **effective** configuration,
-with all `Include` files and defaults applied. If that's not possible (when
-running as non-root, or when sshd refuses to start its config test), it falls
-back to its own parser. The parser mimics sshd: keywords are case-insensitive,
-`Include` globs are expanded in place, and the **first** value it finds wins.
-Options left unset take OpenSSH's defaults. For example, an unset
-`PermitRootLogin` means `prohibit-password`, which is a FAIL.
+**Exit status:** `0` means no control failed, `1` means at least one still fails, `2` means
+a usage error or a refusal to run (e.g. `harden` without root, or without a terminal and
+without `--yes`). A dry run exits `0`.
 
-The script also scans `Match` blocks separately. A block such as
-`Match Address 10.0.0.0/8` followed by `PermitRootLogin yes` makes SSH-1 fail
-even when the global setting is `no`.
+Typical workflow on a new VM:
 
-## Read-only guarantee
+```bash
+sudo ./harden-audit.sh audit --report before.html     # what's wrong, and why
+sudo ./harden-audit.sh harden --dry-run               # exactly what would change
+sudo ./harden-audit.sh harden --report after.html     # apply, one confirmation per control
+```
 
-The script is written so that it cannot modify the host:
+In CI or configuration management, the audit exit code works as a gate:
+`sudo ./harden-audit.sh audit --quiet --report audit.json || alert-the-team`.
 
-- It only reads files (`stat`, `awk`, `grep`) and runs inspection commands:
-  `sshd -T`, `systemctl is-active`/`is-enabled`/`list-units`,
-  `nft list ruleset`, `iptables -S`, `apt-config dump`, `dpkg-query -W`.
-- It writes **no files at all**, not even temp files. Bash here-strings
-  (`<<<`) and here-docs can create temp files, so the audit code doesn't use
-  them.
-- It does **not** call `ufw status`, because that command writes
-  `/run/ufw.lock`. It reads `/etc/ufw/ufw.conf` instead.
-- It only queries netfilter (`nft`, `iptables`) when the matching kernel
-  module is already loaded, so the audit can never load a kernel module.
-- It never runs package managers or `systemctl start/stop/enable`, and it
-  never uses `sudo` itself.
-- It reads `/etc/shadow` only to look for **empty** password fields. It never
-  prints password hashes.
+## What it checks, and why
 
-The test suite verifies this: it runs the audit under `strace` and fails on
-any open-for-write or other mutating syscall (see [Testing](#testing)).
+Severity sets each control's weight in the score: high = 3, medium = 2, low = 1.
 
-## Sample output
+| ID | Control | Passes when | Severity | Why it matters |
+|---|---|---|---|---|
+| SSH-1 | SSH root login disabled | `PermitRootLogin no`, and no `Match` block turns it back on | high | Root is the one account every attacker knows exists. Logging in as yourself and using sudo leaves an audit trail, and a leaked root credential alone is no longer enough. |
+| SSH-2 | SSH password authentication disabled | `PasswordAuthentication no`, keyboard-interactive is not a password backdoor via PAM, and no `Match` block re-enables passwords | high | Internet-facing SSH sees constant password guessing. Keys can't realistically be brute-forced and aren't affected by password reuse. |
+| SSH-3 | No empty passwords over SSH | `PermitEmptyPasswords no` | high | Otherwise any account without a password is a remote shell. |
+| SSH-4 | Limited authentication attempts | `MaxAuthTries` ≤ 4 (OpenSSH default: 6) | medium | Slows brute force and makes it stand out in the logs. |
+| SSH-5 | X11 forwarding disabled | `X11Forwarding no` (Debian/Ubuntu ship `yes`) | low | A compromised server could reach back into the admin's desktop: keystrokes, screenshots. |
+| AUTH-1 | Password ageing policy | `/etc/login.defs`: `PASS_MAX_DAYS` ≤ 365, `PASS_MIN_DAYS` ≥ 1, `PASS_WARN_AGE` ≥ 7 | medium | Limits how long a stolen password stays useful, and stops users cycling straight back to the old one. |
+| AUTH-2 | No empty or unshadowed passwords | No empty password field in `/etc/passwd` or `/etc/shadow`, and no hashes in world-readable `/etc/passwd` | high | Empty passwords need no cracking at all; hashes in `/etc/passwd` can be copied by any user and cracked offline. |
+| AUTH-3 | Password quality enforced | `pam_pwquality` is in the PAM password stack with `minlen` ≥ 14 | medium | Weak passwords can only be rejected at the moment they are set. |
+| FW-1 | Host firewall active | ufw enabled, firewalld running, or an nftables/iptables input chain that drops traffic | high | Default-deny means a service installed or misconfigured later isn't automatically exposed. |
+| SVC-1 | No unnecessary services | None of 19 legacy or rarely-needed services is running (telnet, rsh, TFTP, FTP, (x)inetd, NIS, Avahi, CUPS, rpcbind, NFS, Samba, SNMP, ...) | medium | Every listening daemon is attack surface; several of these send passwords in cleartext. |
+| FILE-1 | `/etc/passwd` permissions | 644 or stricter, `root:root` | high | Write access means adding a UID 0 account: instant root. |
+| FILE-2 | `/etc/shadow` permissions | 640 or stricter, `root:shadow` (Debian) or `root:root` (RHEL) | high | Read access means offline cracking of every password hash. |
+| FILE-3 | `/etc/group` permissions | 644 or stricter, `root:root` | medium | Write access means adding yourself to `sudo`, `wheel` or `docker`. |
+| FILE-4 | `/etc/gshadow` permissions | 640 or stricter, `root:shadow`/`root:root` | medium | Group password hashes and group administrator lists. |
+| UPD-1 | Automatic security updates | `unattended-upgrades` enabled with its timers (Debian/Ubuntu), or `dnf-automatic` set to install (RHEL family) | high | Most real compromises use vulnerabilities that already have a patch. |
+| AUD-1 | auditd running | auditd installed, running and enabled at boot (SKIP inside containers, where auditd cannot run) | medium | Records logins, privilege changes and edits to key files in a log users can't alter. |
+| AUD-2 | Audit rules configured | Rules watch `/etc/passwd`, `shadow`, `group`, `gshadow`, `sudoers`, `sudoers.d` and `sshd_config` | medium | Answers "who changed this, and when?" after an incident. |
 
-This is real output, captured on an Ubuntu 24.04 test machine with some
-deliberate problems. The machine runs without systemd, so the service check
-falls back to looking at running processes. With systemd, it reports unit
-names (e.g. `cups.service`), and the fix suggests
-`sudo systemctl disable --now <unit>`.
+`harden-audit.sh list` prints the same catalogue from the code.
+
+## How hardening works
+
+`harden` runs the audit silently, then walks through the failing controls in order. For each one it:
+
+1. **Shows the plan.** Each fix is written once against small `act_*` helpers (`act_run`,
+   `act_write_file`, `act_set_option`, `act_pkg_install`, ...). In plan mode they only print
+   what they would do, including the complete content of new files. `--dry-run` is the same
+   plan for every control.
+2. **Asks.** You answer `[y]es / [n]o / [a]ll remaining / [q]uit`. Without a terminal it
+   refuses to run unless you pass `--yes`.
+3. **Applies, carefully:**
+   - Every file is **copied to `/var/backups/harden-audit/<timestamp>-XXXX/`** (mode 700)
+     before it is changed. Files that didn't exist yet are listed in `created-files.txt`.
+     Command output and the original permissions go to `harden.log` in the same directory.
+   - Files are replaced **atomically**: written to a temp file in the same directory, then
+     renamed. Owner and mode are preserved, and SELinux labels are restored where relevant.
+   - SSH settings go into `/etc/ssh/sshd_config.d/00-hardening.conf`. sshd uses the *first*
+     value it finds, and `00-` sorts first. Without an `Include`, they go at the top of
+     `sshd_config`. The change is **validated with `sshd -t` and rolled back** if sshd rejects
+     it. If `sshd -t` already fails beforehand, nothing is changed. Then sshd is reloaded.
+   - Existing settings are **never loosened**: AUTH-1 only changes the `login.defs` values
+     that fail, so `PASS_MAX_DAYS 90` stays 90.
+   - A fix that can't finish (e.g. firewalld without systemd) **stops before changing
+     anything** and is reported as manual.
+4. **Re-audits** and prints each control's before/after status and the score change, and
+   writes the report if you asked for one.
+
+### Lock-out safety checks
+
+These fixes are **refused** unless you pass `--force`:
+
+| Fix | Refused when |
+|---|---|
+| SSH-1 (disable root login) | No non-root user with a login shell is in `sudo`, `wheel` or `admin`, so nobody could become root over SSH afterwards. |
+| SSH-2 (disable passwords) | No non-root user has a key in an `AuthorizedKeysFile` (`%h`/`%u` tokens are expanded), **or** you are running it over SSH (`SSH_CONNECTION`) as a user who has no key yourself. |
+
+Also:
+
+- The firewall fix always **allows the SSH port first** (read from the effective sshd config,
+  so a custom port is respected) before switching to default-deny.
+- `Match` blocks that override a setting are reported for manual review, never edited
+  automatically.
+- SVC-1 can't know whether a host is *meant* to be, say, a DNS server. Its plan says so:
+  decline it, or use `--skip SVC-1`.
+
+### Undoing a change
+
+There is no automatic rollback command (yet). Everything needed to undo a run is in its backup directory:
+
+```bash
+ls /var/backups/harden-audit/                                   # one directory per run
+sudo cp -a /var/backups/harden-audit/<run>/etc/login.defs /etc/login.defs     # restore a file
+xargs -d '\n' sudo rm -f -- < /var/backups/harden-audit/<run>/created-files.txt   # remove files it created
+less /var/backups/harden-audit/<run>/harden.log                 # every command, original permissions
+```
+
+Packages it installed (e.g. `ufw`, `auditd`) and services it disabled are listed in
+`harden.log`. Remove or re-enable them with your package manager and `systemctl`.
+
+## Example output
+
+All of this is real output from the demo container. The full reports are in
+[`docs/`](docs/): [Markdown before](docs/example-report-before.md),
+[Markdown after](docs/example-report-after.md), and HTML
+[before](docs/example-report-before.html) and [after](docs/example-report-after.html)
+(download to view).
+
+**Audit (excerpt):**
 
 ```text
-$ sudo ./harden-audit.sh
-Linux hardening audit (harden-audit.sh 1.0.0, read-only)
+$ sudo harden-audit audit
+Linux hardening audit (harden-audit.sh 2.0.0)
 Host:   web01
-OS:     Ubuntu 24.04.5 LTS (kernel 6.18.44-fc-v114)
-Date:   2026-10-14 02:58:51 UTC
+OS:     Ubuntu 24.04.5 LTS (kernel 6.18.44-fc-v185)
+Date:   2026-10-29 23:14:29 UTC
 User:   root
 
 == 1. SSH server ==
 [FAIL] SSH-1   SSH root login is disabled
-        Detail: PermitRootLogin is 'without-password' (effective config from 'sshd -T'). Root can still log in with an SSH key.
+        Detail: PermitRootLogin is 'yes' (effective config from 'sshd -T'). Root can log in directly, including with a password.
         Fix:    Add 'PermitRootLogin no' to /etc/ssh/sshd_config.d/00-hardening.conf (drop-ins are read first, and sshd uses the FIRST value it finds).
                 Log in as a normal user and use sudo instead. Then: sudo sshd -t && sudo systemctl reload ssh
 [FAIL] SSH-2   SSH password authentication is disabled
@@ -125,114 +237,196 @@ User:   root
         Fix:    First make sure every admin can log in with an SSH key (ssh-copy-id user@host)!
                 Then add 'PasswordAuthentication no' and 'KbdInteractiveAuthentication no' to /etc/ssh/sshd_config.d/00-hardening.conf (drop-ins are read first, and sshd uses the FIRST value it finds).
                 Then: sudo sshd -t && sudo systemctl reload ssh
-[PASS] SSH-3   SSH does not allow empty passwords
-        Detail: PermitEmptyPasswords is 'no' (effective config from 'sshd -T').
-
-== 2. Password policy ==
-[FAIL] AUTH-1  Password ageing policy is set
-        Detail: PASS_MAX_DAYS is '99999' (should be 365 or less)
-                PASS_MIN_DAYS is '0' (should be 1 or more)
-        Fix:    Edit /etc/login.defs and set: PASS_MAX_DAYS 365, PASS_MIN_DAYS 1, PASS_WARN_AGE 7.
-                This only affects NEW accounts. For existing ones run, per user: sudo chage --maxdays 365 --mindays 1 --warndays 7 <user>
-[FAIL] AUTH-2  No accounts have empty or unshadowed passwords
-        Detail: Accounts with an EMPTY password: deploy. Anyone can log in as them without a password.
-        Fix:    Lock each empty account (sudo passwd -l <user>) or set a password (sudo passwd <user>).
-
-== 3. Firewall ==
-[FAIL] FW-1    A host firewall is active
-        Detail: No active firewall found (checked ufw, firewalld, nftables and iptables). Notes: ufw is installed but not enabled. Every listening service is reachable from the network.
-        Fix:    sudo ufw allow OpenSSH && sudo ufw default deny incoming && sudo ufw enable
-                (install first with 'sudo apt install ufw' if needed; allow SSH BEFORE enabling or you may lock yourself out)
-
-== 4. Unnecessary services ==
-[FAIL] SVC-1   No unnecessary or insecure services are running
-        Detail: Active services that are insecure or rarely needed on a server (checked running processes, as systemd is not in use):
-                  - Avahi mDNS/zeroconf daemon [process avahi-daemon]
-                  - CUPS print server [process cupsd]
-                Each one is extra attack surface; disable the ones you do not need.
-        Fix:    Stop the listed daemons and remove the packages that provide them (or disable them in your init system).
-
+...
 == 5. Account file permissions ==
 [PASS] FILE-1  /etc/passwd permissions are 644 or stricter, owned by root:root
         Detail: /etc/passwd is mode 644, owned by root:root.
 [FAIL] FILE-2  /etc/shadow permissions are 640 or stricter, owned by root:root/shadow
         Detail: mode is 644, which grants more than 640. /etc/shadow contains password hashes; if other users can read it they can crack them offline.
         Fix:    sudo chown root:shadow /etc/shadow && sudo chmod 0640 /etc/shadow
-[PASS] FILE-3  /etc/group permissions are 644 or stricter, owned by root:root
-        Detail: /etc/group is mode 644, owned by root:root.
-[PASS] FILE-4  /etc/gshadow permissions are 640 or stricter, owned by root:root/shadow
-        Detail: /etc/gshadow is mode 640, owned by root:shadow.
-
-== 6. Automatic updates ==
-[PASS] UPD-1   Automatic security updates are enabled
-        Detail: unattended-upgrades is installed; APT::Periodic::Update-Package-Lists=1, Unattended-Upgrade=1.
-
+...
+== 7. Auditing (auditd) ==
+[SKIP] AUD-1   auditd is installed and running
+        Detail: This is a container. auditd needs the host kernel's audit subsystem and cannot run inside a container; the host should run it.
+        Fix:    Run this audit on the container host (or a VM) to check auditd.
+...
 == Summary ==
-5 passed, 7 failed, 0 skipped (12 checks)
-$ echo $?
-1
+2 passed, 14 failed, 1 skipped (17 checks)
+Hardening score: 13/100 (grade F) [##------------------]
 ```
 
-The same host after the fixes, in quiet mode:
+**Dry run (excerpt):**
 
 ```text
-$ sudo ./harden-audit.sh --quiet
-Linux hardening audit (harden-audit.sh 1.0.0, read-only)
-Host:   web02
-OS:     Ubuntu 24.04.5 LTS (kernel 6.18.44-fc-v114)
-Date:   2026-10-14 02:59:04 UTC
-User:   root
+$ sudo harden-audit harden --dry-run --only SSH-1,SSH-2,FW-1
+Linux hardening - DRY RUN (nothing will be changed) (harden-audit.sh 2.0.0)
+...
+SSH-1 SSH root login is disabled (high)
+  PermitRootLogin is 'yes' (effective config from 'sshd -T'). Root can log in directly, including with a password.
+    [note]  admin users who can still use sudo: ubuntu admin
+    [plan]  set 'PermitRootLogin no' in /etc/ssh/sshd_config.d/00-hardening.conf (currently: unset)
+    [plan]  sshd -t   (validate; the change is rolled back if this fails)
+    [plan]  kill -HUP 9
 
-== Summary ==
-12 passed, 0 failed, 0 skipped (12 checks)
-$ echo $?
-0
+FW-1 A host firewall is active (high)
+  No active firewall found (checked ufw, firewalld, nftables and iptables). Notes: ufw is installed but not enabled. Every listening service is reachable from the network.
+    [note]  already installed: ufw
+    [plan]  ufw allow 22/tcp comment 'SSH (harden-audit.sh)'
+    [plan]  ufw default deny incoming
+    [plan]  ufw default allow outgoing
+    [plan]  ufw --force enable
+    [note]  only SSH (port 22) is allowed in. Open anything else this host serves with: ufw allow PORT/tcp
+
+== Result ==
+Dry run: nothing was changed. 3 fix(es) planned, 0 need manual work, 0 refused by a safety check.
 ```
 
-When it is run without root, checks that need privileged access are marked
-SKIP instead of guessing:
+**Harden (end of the run):**
 
 ```text
-[SKIP] AUTH-2  No accounts have empty or unshadowed passwords
-        Detail: All /etc/passwd entries use shadowed passwords (/etc/shadow not readable as nobody; only /etc/passwd was checked).
-        Fix:    Re-run this audit as root (sudo) to check /etc/shadow too.
+== Result ==
+  SSH-1   FAIL -> PASS
+  SSH-2   FAIL -> PASS
+  ...
+  UPD-1   FAIL -> PASS
+  AUD-2   FAIL -> PASS
+Applied 14, failed 0, declined 0, manual 0, refused 0.
+Hardening score: 13/100 (grade F) -> 100/100 (grade A)
+Backups and command log: /var/backups/harden-audit/20261029-231523-4r9R
 ```
 
-## Testing
+**A refused fix** (the admin's SSH key removed first):
 
-```bash
-sudo tests/run-tests.sh
+```text
+SSH-2 SSH password authentication is disabled (high)
+  PasswordAuthentication is 'yes' (effective config from 'sshd -T').
+  Passwords can be brute-forced; SSH keys cannot realistically be guessed.
+    [refuse] no non-root user has an SSH key in an authorized_keys file, so nobody could log in after passwords are disabled. Add one with: ssh-copy-id user@host
+    [refuse] Fix that first, or re-run with --force if you are sure you will not lose access.
 ```
 
-The tests run the audit against good and bad scenarios: insecure SSH config,
-`Match` overrides, empty passwords, a world-readable shadow file, a
-world-writable group file, auto-updates turned off, a fake `vsftpd` process,
-a non-root user, and the CLI options. They also check the read-only guarantee
-with `strace`.
+## Reports and the hardening score
 
-The tests never touch the real system files. Each scenario runs inside a
-private mount namespace (`unshare -m`), where fixture files from a temp
-directory are bind-mounted over paths like `/etc/shadow`. The bind mounts
-disappear when the scenario ends. You need root, `unshare`, and optionally
-`strace`. The script is also clean under `shellcheck`.
+`--report FILE` writes one of three formats:
+
+- **HTML:** a single self-contained file (inline CSS, no JavaScript, no external resources,
+  light and dark themes) with a score ring, per-category table, every control, and a card
+  per finding showing what was found, why it matters and how to fix it.
+- **Markdown:** the same content, which renders well on GitHub and in a CI job summary.
+- **JSON:** machine-readable: score, grade, summary counts, and every control with its
+  status, detail, fix and rationale. After `harden` it also includes `score_before` and the
+  outcome of each fix.
+
+Reports are created with **mode 600** (they name accounts and weaknesses). They are written
+through a temp file in the target directory and then renamed, so a symlink planted at the
+report path is replaced, not followed.
+
+**Score** = severity-weighted share of evaluated controls that pass:
+`round(100 × Σweight(PASS) / Σweight(PASS + FAIL))` with high = 3, medium = 2, low = 1.
+SKIPs are left out, so a non-root run isn't penalised for checks it couldn't make. Grades:
+A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F below.
+
+![HTML report after hardening: score 100/100, grade A](docs/images/report-after.png)
+
+## The read-only guarantee
+
+The `audit` and `list` commands and `harden --dry-run` are built so they cannot modify the host:
+
+- They only read files and run inspection commands (`stat`, `sshd -T`, `systemctl
+  is-active`/`is-enabled`/`list-units`, `nft list ruleset`, `iptables -S`, `auditctl -l`,
+  `apt-config dump`, `dpkg-query`, `rpm -q`).
+- They write **no files**, apart from a report you explicitly ask for. That includes temp
+  files: bash here-strings and here-docs can create those, so the tool doesn't use them.
+- They do **not** call `ufw status`, which writes `/run/ufw.lock`. They read
+  `/etc/ufw/ufw.conf` instead.
+- They only query netfilter (`nft`, `iptables`) when the kernel module is already loaded,
+  so an audit can never trigger a module load.
+- `/etc/shadow` is read only to look for *empty* password fields. Hashes are never printed.
+
+This is **tested, not just intended**. The host tests run the audit and the dry run under
+`strace`, and fail on any open-for-write or other mutating system call. With `--report`, the
+only writes allowed are inside the report's directory. That test is how the `ufw.lock` write
+was found.
+
+## Testing and CI
+
+| Suite | Where it runs | What it proves |
+|---|---|---|
+| `tests/run-tests.sh` (`sudo make test`) | the host, read-only | 62 scenario checks. Fixture files (`sshd_config`, `/etc/shadow`, `login.defs`, PAM, apt config, ...) are bind-mounted over the real ones **inside a private mount namespace** (`unshare -m`), so the real system is never touched. Covers secure/insecure configs, `Match` overrides, non-root behaviour, all report formats, the harden safety rails, and the `strace` read-only proof. |
+| `tests/container-tests.sh` via `tests/docker-test.sh` (`make test-docker`) | the insecure Ubuntu demo container | 63 end-to-end checks: every expected FAIL, that dry runs, refusals and declined prompts change nothing (fingerprint of `/etc`, modes, services, backups), full hardening, then **proof from the outside**: key login still works, password and root logins are rejected over real SSH, the empty-password account is locked, ufw is active, vsftpd is stopped, packages and rules are in place, backups exist, and a second run is a no-op. |
+| `tests/rocky-smoke.sh` (`make test-rocky`) | a Rocky Linux 9 container | The RHEL-family paths: dnf, `system-auth`, RHEL-style `/etc/shadow` (`0000 root:root`), and fixes that need systemd stopping cleanly without it. |
+
+[GitHub Actions](.github/workflows/ci.yml) runs on every push to `main` and every pull request:
+
+- **Lint:** [ShellCheck](https://www.shellcheck.net/) on every shell file, hadolint on the
+  Dockerfile, actionlint on the workflow.
+- **Host tests** on the Ubuntu 24.04 runner, plus a real read-only audit and dry run of the
+  runner VM (which, unlike the containers, runs systemd), uploaded as an artifact.
+- **Container tests:** builds the demo image and runs the end-to-end suite. The hardened
+  report is added to the job summary and all reports are uploaded as artifacts.
+- **RHEL-family smoke test** in Rocky Linux 9.
+
+The workflow runs with read-only repository permissions and doesn't persist checkout
+credentials. There is no CodeQL job because the project is pure Bash, which CodeQL doesn't
+analyse; ShellCheck is the static analysis here.
+
+## Project layout
+
+```text
+harden-audit.sh          CLI: argument parsing, audit/harden/list commands, header and summary
+lib/common.sh            output, control registry, result recording, score, OS/container detection
+lib/report.sh            Markdown / HTML / JSON report writers
+lib/harden.sh            harden engine: plan vs apply, act_* helpers, backups, prompts
+lib/controls/*.sh        one file per category: register_control, check_*, fix_*
+Dockerfile, docker/      the deliberately insecure Ubuntu demo container
+tests/                   host scenario tests, container end-to-end tests, Rocky smoke test
+docs/                    example reports and screenshots
+```
+
+Adding a control means calling `register_control ID SEVERITY CATEGORY FIX_FUNCTION TITLE WHY`,
+writing a `check_*` function that calls `report PASS|FAIL|SKIP`, and optionally a `fix_*`
+function built from the `act_*` helpers, so it automatically gets a dry run, a confirmation
+prompt, backups and logging.
 
 ## Limitations
 
-- This is a **basic** checklist covering a few high-value controls. It is not
-  a full CIS assessment. For a complete audit, use a dedicated tool such as
-  OpenSCAP, CIS-CAT or Lynis.
-- Firewall detection is heuristic. It confirms that a firewall is active and
-  drops some traffic, not that the rules make sense. Review them with
-  `sudo ufw status verbose`, `sudo firewall-cmd --list-all` or
-  `sudo nft list ruleset`.
-- The "unnecessary services" list includes services that some hosts are
-  *meant* to run, such as a DNS or NFS server. A FAIL there means "confirm
-  this host should provide it", not "always remove it".
-- Automatic update detection supports the Debian and RHEL families. It
-  reports SKIP on other distributions (SUSE, Arch, ...).
-- Password ageing (AUTH-1) follows the classic CIS recommendation. Some
-  current guidance, such as NIST SP 800-63B, advises against forced
-  periodic password changes. Adjust to your organisation's policy.
-- Always test SSH changes from a second session before logging out, and allow
-  SSH in the firewall *before* enabling it. Otherwise you can lock yourself
-  out.
+- This is a **focused** set of 17 high-value controls, not a full CIS assessment (the
+  Ubuntu benchmark has hundreds). For compliance work, use OpenSCAP, CIS-CAT or Lynis.
+- **Debian/Ubuntu** are the primary target (end-to-end tested). The **RHEL family** is
+  smoke-tested in a container without systemd, so its systemd-dependent fixes (firewalld,
+  dnf-automatic timers) haven't run in CI. Other distributions get the audit, with SKIP
+  where a check is distribution-specific.
+- Firewall detection confirms that a firewall is active and drops traffic, not that its
+  rules are sensible. Review them yourself (`ufw status verbose`, `firewall-cmd --list-all`,
+  `nft list ruleset`).
+- Password ageing (AUTH-1) follows the classic CIS recommendation. Current NIST guidance
+  (SP 800-63B) advises against forced periodic changes. Use `--skip AUTH-1` if your policy
+  follows NIST.
+- auditd cannot run inside containers, so AUD-1 is SKIP there. Audit the container host.
+- There is no automatic rollback command yet. See [Undoing a change](#undoing-a-change).
+
+## What I learned
+
+- **"Read-only" has to be proven, not promised.** I assumed an audit that only "looks"
+  couldn't change anything. Tracing it with `strace` showed `ufw status` writing a lock
+  file. Bash here-strings can create temp files, and querying iptables can load kernel
+  modules. Now the test suite fails on any write.
+- **sshd's configuration rules are subtle.** The *first* value wins, drop-ins are read
+  wherever the `Include` line sits, and `Match` blocks can quietly re-enable root or password
+  logins for some connections. Asking `sshd -T` for the effective config beats parsing the
+  files, but I still needed a parser for non-root runs.
+- **Safe automation is mostly about the unhappy paths.** Show the plan, ask, back up, write
+  atomically, validate (`sshd -t`), roll back, and refuse when a change could lock someone
+  out. Two things surprised me: never loosening a stricter existing value, and never starting
+  a fix that can't finish (e.g. firewalld without systemd).
+- **Bash has sharp edges.** Since Bash 5.2, an unquoted `&` in `${var//pattern/replacement}`
+  means "the matched text", so my HTML escaping turned `<` into `<lt;`. I only found it
+  because a test parses the generated HTML. A timestamped backup directory also collided when
+  two runs started in the same second; `mktemp -d` fixed that.
+- **Writing files as root is a security decision.** Reports are mode 600, and both reports
+  and config files go through a temp file and `rename`, so a planted symlink can't redirect
+  a root-owned write.
+- **Containers aren't small VMs.** No systemd, no auditd, often no IPv6 (vsftpd wouldn't
+  start until I set `listen_ipv6=NO`), and ufw needs `NET_ADMIN`. Testing against fixtures in
+  a private mount namespace let me cover dangerous scenarios without ever touching the real
+  system.
