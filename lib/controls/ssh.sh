@@ -63,6 +63,10 @@ parse_sshd_file() {
 # Returns 0 = config loaded, 1 = no SSH server installed, 2 = config unreadable.
 load_sshd_config() {
     local out line
+    # Start from scratch: harden mode audits more than once per run, and the
+    # parser below keeps the first value it sees for each key.
+    SSHD=()
+    SSHD_SOURCE=""
     if ! have sshd && [[ ! -e $SSHD_CONFIG ]]; then
         return 1
     fi
@@ -233,4 +237,232 @@ Log in as a normal user and use sudo instead. Then: $reload"
             "X11Forwarding is '$val' ($SSHD_SOURCE).$note" \
             "Add 'X11Forwarding no' to $where. Then: $reload"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Fixes (harden mode)
+# ---------------------------------------------------------------------------
+
+# Harden mode writes its SSH settings here when sshd_config includes
+# sshd_config.d (Debian/Ubuntu, RHEL 9+). "00-" sorts first, and sshd uses
+# the first value it finds for each keyword.
+readonly SSH_DROPIN=/etc/ssh/sshd_config.d/00-hardening.conf
+
+ssh_uses_dropins() {
+    [[ -r $SSHD_CONFIG ]] && grep -Eiq '^[[:space:]]*Include[[:space:]=].*sshd_config\.d' "$SSHD_CONFIG"
+}
+
+# login_users - non-root accounts with a real login shell, as "user:home".
+login_users() {
+    getent passwd | awk -F: '$1 != "root" && $3 != 0 && $7 !~ /(nologin|false|sync|halt|shutdown)$/ && $7 != "" { print $1 ":" $6 }'
+}
+
+# admin_users - non-root members of sudo, wheel or admin with a login shell.
+admin_users() {
+    local g members u entry found=" "
+    for g in sudo wheel admin; do
+        members=$(getent group "$g" | cut -d: -f4)
+        for u in ${members//,/ }; do
+            [[ $found == *" $u "* ]] && continue
+            while IFS= read -r entry; do
+                [[ ${entry%%:*} == "$u" ]] && found+="$u "
+            done < <(login_users)
+        done
+    done
+    trim "$found"
+}
+
+# authorized_key_files USER HOME - the AuthorizedKeysFile paths for a user.
+authorized_key_files() {
+    local user=$1 home=$2 spec f
+    spec=${SSHD[authorizedkeysfile]:-.ssh/authorized_keys .ssh/authorized_keys2}
+    for f in $spec; do
+        [[ $f == none ]] && continue
+        f=${f//%%/$'\x01'}
+        f=${f//%h/$home}
+        f=${f//%u/$user}
+        f=${f//$'\x01'/%}
+        [[ $f == /* ]] || f="$home/$f"
+        printf '%s\n' "$f"
+    done
+}
+
+# key_users - non-root login users with at least one key in an
+# AuthorizedKeysFile. Prints "?" if the files cannot be read (not root).
+key_users() {
+    local entry user home f found=""
+    while IFS= read -r entry; do
+        user=${entry%%:*} home=${entry#*:}
+        while IFS= read -r f; do
+            if [[ -e $f && ! -r $f ]]; then
+                printf '?'
+                return
+            fi
+            if [[ -r $f ]] && grep -Eq '^[[:space:]]*[^#[:space:]]' "$f"; then
+                found+="$user "
+                break
+            fi
+        done < <(authorized_key_files "$user" "$home")
+    done < <(login_users)
+    trim "$found"
+}
+
+# ssh_guard REASON - refuse (RC_REFUSED) unless --force was given.
+ssh_guard() {
+    if ((HARDEN_FORCE)); then
+        step note "--force: ignoring safety check: $1"
+        return "$RC_OK"
+    fi
+    step refuse "$1"
+    step refuse "Fix that first, or re-run with --force if you are sure you will not lose access."
+    return "$RC_REFUSED"
+}
+
+# ssh_lockout_check_root - before disabling root logins, make sure another
+# account can still get root.
+ssh_lockout_check_root() {
+    local admins
+    admins=$(admin_users)
+    if [[ -z $admins ]]; then
+        ssh_guard "no non-root user with a login shell is in the sudo, wheel or admin group, so nobody could become root over SSH after this change."
+        return
+    fi
+    act_note "admin users who can still use sudo: $admins"
+}
+
+# ssh_lockout_check_keys - before disabling passwords, make sure someone
+# (including whoever is running this over SSH) has a key to log in with.
+ssh_lockout_check_keys() {
+    local users me=${SUDO_USER:-$(id -un)}
+    if [[ -n ${SSHD[authorizedkeyscommand]:-} && ${SSHD[authorizedkeyscommand]} != none ]]; then
+        act_note "keys come from AuthorizedKeysCommand (${SSHD[authorizedkeyscommand]}); cannot check them - make sure your key works before continuing."
+        return "$RC_OK"
+    fi
+    users=$(key_users)
+    if [[ $users == "?" ]]; then
+        act_note "cannot read other users' authorized_keys without root; the real run checks that someone can still log in with a key."
+        return "$RC_OK"
+    fi
+    if [[ -z $users ]]; then
+        ssh_guard "no non-root user has an SSH key in an authorized_keys file, so nobody could log in after passwords are disabled. Add one with: ssh-copy-id user@host"
+        return
+    fi
+    if [[ -n ${SSH_CONNECTION:-} && $me != root && " $users " != *" $me "* ]]; then
+        ssh_guard "you are logged in over SSH as '$me', who has no authorized SSH key - this session's user would be locked out."
+        return
+    fi
+    act_note "users with SSH keys who can still log in: $users"
+}
+
+# ssh_reload - make the running sshd pick up the new configuration.
+ssh_reload() {
+    local unit pid
+    if has_systemd; then
+        for unit in ssh sshd; do
+            if systemctl is-active --quiet "$unit" 2>/dev/null; then
+                act_run systemctl reload "$unit"
+                return
+            fi
+        done
+        act_note "sshd is not running right now; the new settings apply when it starts."
+    elif [[ -r /run/sshd.pid ]] && pid=$(cat /run/sshd.pid) && [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        act_run kill -HUP "$pid"
+    else
+        act_note "sshd is not running right now; the new settings apply when it starts."
+    fi
+}
+
+# ssh_apply_settings "Keyword value"... - write the settings, validate the
+# result with 'sshd -t' (and put the file back if that fails), then reload.
+ssh_apply_settings() {
+    local kv target existed=0 previous="" check
+    if ssh_uses_dropins; then
+        target=$SSH_DROPIN
+    else
+        target=$SSHD_CONFIG
+    fi
+
+    if ((APPLY)); then
+        # Validate first: if sshd -t already fails we cannot tell whether our
+        # change is safe. A missing privilege separation directory is
+        # normal before sshd's first start and is what systemd creates.
+        if ! check=$(sshd -t 2>&1); then
+            if [[ $check == *"privilege separation directory"* ]]; then
+                act_run mkdir -p -m 755 /run/sshd || return "$RC_FAILED"
+            else
+                step fail "sshd -t already fails before any change: $check"
+                return "$RC_FAILED"
+            fi
+        fi
+        [[ -e $target ]] && existed=1 && previous=$(cat -- "$target")
+    fi
+
+    if [[ $target == "$SSH_DROPIN" ]]; then
+        for kv in "$@"; do
+            act_set_option "$SSH_DROPIN" "${kv%% *}" "${kv#* }" ' ' 644 || return "$RC_FAILED"
+        done
+    else
+        # No sshd_config.d: put the settings at the very top of sshd_config,
+        # where they win over anything later in the file.
+        if ((!APPLY)); then
+            step plan "add at the top of $SSHD_CONFIG: $(join ', ' "$@")"
+        else
+            act_write_file "$SSHD_CONFIG" 600 \
+                "$(printf '%s\n' "# Added by harden-audit.sh" "$@")"$'\n'"$(cat -- "$SSHD_CONFIG")" >/dev/null \
+                || return "$RC_FAILED"
+            step ok "added to the top of $SSHD_CONFIG: $(join ', ' "$@")"
+        fi
+    fi
+
+    if ((!APPLY)); then
+        step plan "sshd -t   (validate; the change is rolled back if this fails)"
+    elif ! check=$(sshd -t 2>&1); then
+        step fail "sshd -t rejected the new configuration: $check"
+        if ((existed)); then
+            printf '%s\n' "$previous" > "$target"
+        else
+            rm -f -- "$target"
+        fi
+        step note "rolled back $target"
+        return "$RC_FAILED"
+    else
+        step ok "sshd -t"
+    fi
+    ssh_reload
+}
+
+# ssh_match_manual KEY SAFE - RC_MANUAL (with an explanation) when a Match
+# block overrides KEY; changing Match blocks is left to a human.
+ssh_match_manual() {
+    local overrides
+    overrides=$(ssh_match_overrides "$1" "$2")
+    [[ -z $overrides ]] && return 1
+    step manual "a Match block overrides this setting; edit it by hand (harden mode does not change Match blocks):"
+    printf '%s\n' "$overrides" | sed 's/^/              /'
+    return 0
+}
+
+fix_ssh_root_login() {
+    ssh_match_manual permitrootlogin no && return "$RC_MANUAL"
+    ssh_lockout_check_root || return
+    ssh_apply_settings "PermitRootLogin no"
+}
+
+fix_ssh_password_auth() {
+    ssh_match_manual passwordauthentication no && return "$RC_MANUAL"
+    ssh_lockout_check_keys || return
+    ssh_apply_settings "PasswordAuthentication no" "KbdInteractiveAuthentication no"
+}
+
+fix_ssh_empty_passwords() {
+    ssh_apply_settings "PermitEmptyPasswords no"
+}
+
+fix_ssh_max_auth_tries() {
+    ssh_apply_settings "MaxAuthTries 4"
+}
+
+fix_ssh_x11_forwarding() {
+    ssh_match_manual x11forwarding no && return "$RC_MANUAL"
+    ssh_apply_settings "X11Forwarding no"
 }

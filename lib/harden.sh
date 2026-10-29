@@ -78,9 +78,10 @@ ensure_backup_dir() {
     : > "$HARDEN_LOGFILE"
 }
 
-# backup_file PATH - copy PATH into the backup directory (once per run). A
-# file that does not exist yet is listed in created-files.txt instead, so a
-# rollback knows to delete it.
+# backup_file PATH - copy PATH into the backup directory (once per run, so
+# the copy is always the state before harden-audit touched it). A file that
+# does not exist yet is listed in created-files.txt instead, so a rollback
+# knows to delete it.
 backup_file() {
     local path=$1
     [[ -n ${BACKED_UP[$path]+set} ]] && return 0
@@ -92,16 +93,6 @@ backup_file() {
         printf '%s\n' "$path" >> "$BACKUP_DIR/created-files.txt"
         BACKED_UP[$path]=created
     fi
-}
-
-# restore_file PATH - undo this run's changes to PATH (used when a change
-# fails validation, e.g. sshd -t rejects the new SSH configuration).
-restore_file() {
-    local path=$1
-    case ${BACKED_UP[$path]:-} in
-        copied)  cp -a -- "$BACKUP_DIR$path" "$path" ;;
-        created) rm -f -- "$path" ;;
-    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -329,7 +320,7 @@ confirm() {
 log_outcome() { HARDEN_LOG+=("$1|$2|$3"); }
 
 cmd_harden() {
-    local id fn rc title plan candidates=() attempted=() fixed=0 failed=0 manual=0 declined=0
+    local id fn rc title plan candidates=() attempted=() fixed=0 failed=0 manual=0 refused=0 declined=0
     declare -A before=()
 
     if ((!HARDEN_DRY_RUN)) && ! is_root; then
@@ -399,7 +390,7 @@ cmd_harden() {
             continue
         elif ((rc == RC_REFUSED)); then
             log_outcome "$id" refused "Refused by a safety check; re-run with --force to override."
-            manual=$((manual + 1))
+            refused=$((refused + 1))
             continue
         fi
         if ((HARDEN_DRY_RUN)); then
@@ -435,8 +426,8 @@ cmd_harden() {
 
     printf '\n%s== Result ==%s\n' "$C_BOLD" "$C_OFF"
     if ((HARDEN_DRY_RUN)); then
-        printf 'Dry run: nothing was changed. %d fix(es) planned, %d need manual work.\n' \
-            $((${#candidates[@]} - manual)) "$manual"
+        printf 'Dry run: nothing was changed. %d fix(es) planned, %d need manual work, %d refused by a safety check.\n' \
+            $((${#candidates[@]} - manual - refused)) "$manual" "$refused"
         printf 'Apply them with: sudo %s harden\n' "$0"
         save_report || return 2
         return 0
@@ -446,7 +437,7 @@ cmd_harden() {
     for id in "${attempted[@]}"; do
         printf '  %-7s %s -> %s\n' "$id" "${before[$id]}" "${R_STATUS[$id]}"
     done
-    printf 'Applied %d, failed %d, declined %d, manual %d.\n' "$fixed" "$failed" "$declined" "$manual"
+    printf 'Applied %d, failed %d, declined %d, manual %d, refused %d.\n' "$fixed" "$failed" "$declined" "$manual" "$refused"
     printf 'Hardening score: %s/100 (grade %s) -> %s%s%s\n' "${SCORE_BEFORE:-n/a}" "$GRADE_BEFORE" \
         "$(score_color "${SCORE:-0}")" "$(score_text)" "$C_OFF"
     if [[ -n $BACKUP_DIR ]]; then

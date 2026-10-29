@@ -87,6 +87,7 @@ usage() {
         "  -y, --yes          Apply every fix without asking (for automation)" \
         "      --only IDS     Only fix these controls, e.g. --only SSH-1,FW-1" \
         "      --skip IDS     Never touch these controls" \
+        "      --force        Override the safety checks that prevent SSH lock-outs" \
         "" \
         "WARNING: harden changes system configuration. Try it on a VM or snapshot" \
         "first. Changed files are backed up under /var/backups/harden-audit/." \
@@ -198,6 +199,7 @@ main() {
             --format=*)    REPORT_FORMAT=${1#*=} ;;
             -n|--dry-run)  HARDEN_DRY_RUN=1; harden_opt=$1 ;;
             -y|--yes)      HARDEN_YES=1; harden_opt=$1 ;;
+            --force)       HARDEN_FORCE=1; harden_opt=$1 ;;
             --only|--skip)
                 [[ -n ${2:-} ]] || { echo "$1 needs a comma-separated list of control IDs" >&2; return 2; }
                 validate_id_list "$2" || return 2
