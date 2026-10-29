@@ -18,6 +18,26 @@ register_control AUTH-3 medium "Password policy" fix_password_quality \
     "Password quality is enforced (pam_pwquality, minlen >= 14)" \
     "Short passwords fall quickly to offline cracking. pam_pwquality rejects weak passwords at the moment they are set, which is the only point where the plaintext is available to check."
 
+# In /etc/passwd the password field should be "x" (see /etc/shadow). An empty
+# field means no password at all; anything else that is not a lock marker
+# ("*", "!") is a password hash readable by every user.
+
+# empty_password_accounts - space-separated users with an empty password
+# field in /etc/passwd or (if readable) /etc/shadow.
+empty_password_accounts() {
+    local names
+    names=$(awk -F: 'NF > 1 && $2 == "" { print $1 }' /etc/passwd 2>/dev/null)
+    if [[ -r /etc/shadow ]]; then
+        names+=$'\n'$(awk -F: 'NF > 1 && $2 == "" { print $1 }' /etc/shadow 2>/dev/null)
+    fi
+    trim "$(printf '%s\n' "$names" | sed '/^$/d' | sort -u | tr '\n' ' ')"
+}
+
+# unshadowed_accounts - users whose password hash is in /etc/passwd.
+unshadowed_accounts() {
+    trim "$(awk -F: '$2 != "" && $2 != "x" && $2 !~ /^[*!]/ { printf "%s ", $1 }' /etc/passwd 2>/dev/null)"
+}
+
 login_defs_value() {
     local key=$1 line
     [[ -r /etc/login.defs ]] || return 0
@@ -58,18 +78,11 @@ This only affects NEW accounts. For existing ones run, per user: sudo chage --ma
 
     # AUTH-2: no account may have an empty or non-shadowed password
     local unshadowed empty="" file_note=""
-    # In /etc/passwd the field should be "x" (see /etc/shadow). An empty field
-    # means no password at all; anything else that is not a lock marker
-    # ("*", "!") is a password hash readable by every user.
-    empty=$(awk -F: 'NF > 1 && $2 == "" { printf "%s ", $1 }' /etc/passwd 2>/dev/null)
-    unshadowed=$(awk -F: '$2 != "" && $2 != "x" && $2 !~ /^[*!]/ { printf "%s ", $1 }' /etc/passwd 2>/dev/null)
-    if [[ -r /etc/shadow ]]; then
-        empty+=$(awk -F: 'NF > 1 && $2 == "" { printf "%s ", $1 }' /etc/shadow 2>/dev/null)
-    else
+    empty=$(empty_password_accounts)
+    unshadowed=$(unshadowed_accounts)
+    if [[ ! -r /etc/shadow ]]; then
         file_note=" (/etc/shadow not readable as $(id -un); only /etc/passwd was checked)"
     fi
-    unshadowed=$(trim "$unshadowed")
-    empty=$(trim "$(printf '%s' "$empty" | tr -s ' ' '\n' | sort -u | tr '\n' ' ')")
     if [[ -n $empty || -n $unshadowed ]]; then
         local detail="" fix=""
         [[ -n $empty ]] && detail+="Accounts with an EMPTY password: $empty. Anyone can log in as them without a password."$'\n'
@@ -154,4 +167,42 @@ check_password_quality() {
             "pam_pwquality is enabled in $pam_file, but minlen is $minlen (from $src); it should be at least 14." \
             "Set 'minlen = 14' in /etc/security/pwquality.conf.d/50-hardening.conf (or remove a smaller minlen= from the PAM line)."
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Fixes (harden mode)
+# ---------------------------------------------------------------------------
+
+# fix_password_ageing - set only the login.defs values that fail, so a
+# stricter existing value (e.g. PASS_MAX_DAYS 90) is never loosened.
+fix_password_ageing() {
+    local max min warn
+    max=$(login_defs_value PASS_MAX_DAYS)
+    min=$(login_defs_value PASS_MIN_DAYS)
+    warn=$(login_defs_value PASS_WARN_AGE)
+    if ! { [[ $max =~ ^[0-9]+$ ]] && ((max <= 365)); }; then
+        act_set_option /etc/login.defs PASS_MAX_DAYS 365 $'\t' || return "$RC_FAILED"
+    fi
+    if ! { [[ $min =~ ^[0-9]+$ ]] && ((min >= 1)); }; then
+        act_set_option /etc/login.defs PASS_MIN_DAYS 1 $'\t' || return "$RC_FAILED"
+    fi
+    if ! { [[ $warn =~ ^[0-9]+$ ]] && ((warn >= 7)); }; then
+        act_set_option /etc/login.defs PASS_WARN_AGE 7 $'\t' || return "$RC_FAILED"
+    fi
+    act_note "applies to accounts created from now on; existing accounts are not changed (use: chage --maxdays 365 --mindays 1 --warndays 7 USER)"
+}
+
+# fix_empty_passwords - move hashes into /etc/shadow, then lock every
+# account with an empty password (its password field becomes "!").
+fix_empty_passwords() {
+    local user empty
+    if [[ -n $(unshadowed_accounts) ]]; then
+        act_run pwconv || return "$RC_FAILED"
+    fi
+    empty=$(empty_password_accounts)
+    for user in $empty; do
+        act_run passwd -l "$user" || return "$RC_FAILED"
+    done
+    [[ -n $empty ]] && act_note "locked: $empty. Root can still use them via su/sudo -u; set a password with 'passwd USER' if one needs to log in."
+    return "$RC_OK"
 }

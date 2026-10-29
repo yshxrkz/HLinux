@@ -178,6 +178,16 @@ render_markdown() {
         "$N_PASS" "$N_FAIL" "$N_SKIP" $((N_PASS + N_FAIL + N_SKIP))
     printf 'The score weights each control by severity (high = 3, medium = 2, low = 1) and leaves skipped controls out.\n\n'
 
+    local entry hid outcome msg
+    if ((${#HARDEN_LOG[@]})); then
+        printf '## Hardening actions\n\n| Control | Outcome | Note |\n|---|---|---|\n'
+        for entry in "${HARDEN_LOG[@]}"; do
+            IFS='|' read -r hid outcome msg < <(printf '%s\n' "$entry")
+            printf '| %s | %s | %s |\n' "$hid" "$outcome" "$(md_cell "$msg")"
+        done
+        printf '\n'
+    fi
+
     printf '## Results by category\n\n'
     printf '| Category | Passed | Failed | Skipped |\n|---|---:|---:|---:|\n'
     while IFS= read -r cat; do
@@ -277,6 +287,16 @@ render_html() {
     fi
     printf '</dl>\n<p class="muted">Score = severity-weighted share of passed controls (high 3, medium 2, low 1); skipped controls are excluded.</p></div>\n</section>\n'
 
+    local entry hid outcome msg
+    if ((${#HARDEN_LOG[@]})); then
+        printf '<h2>Hardening actions</h2>\n<div class="card"><table>\n<tr><th>Control</th><th>Outcome</th><th>Note</th></tr>\n'
+        for entry in "${HARDEN_LOG[@]}"; do
+            IFS='|' read -r hid outcome msg < <(printf '%s\n' "$entry")
+            printf '<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n' "$hid" "$(html_escape "$outcome")" "$(html_escape "$msg")"
+        done
+        printf '</table></div>\n'
+    fi
+
     printf '<h2>Results by category</h2>\n<div class="card"><table>\n<tr><th>Category</th><th class="n">Passed</th><th class="n">Failed</th><th class="n">Skipped</th></tr>\n'
     while IFS= read -r cat; do
         read -r p f s < <(category_counts "$cat")
@@ -350,6 +370,17 @@ render_json() {
         printf '  "score_before": %s,\n  "grade_before": %s,\n' "$SCORE_BEFORE" "$(json_string "$GRADE_BEFORE")"
     fi
     printf '  "summary": {"pass": %d, "fail": %d, "skip": %d},\n' "$N_PASS" "$N_FAIL" "$N_SKIP"
+    local entry hid outcome msg hfirst=1
+    printf '  "hardening": ['
+    for entry in "${HARDEN_LOG[@]}"; do
+        IFS='|' read -r hid outcome msg < <(printf '%s\n' "$entry")
+        ((hfirst)) || printf ','
+        hfirst=0
+        printf '\n    {"id": %s, "outcome": %s, "note": %s}' \
+            "$(json_string "$hid")" "$(json_string "$outcome")" "$(json_string "$msg")"
+    done
+    ((hfirst)) || printf '\n  '
+    printf '],\n'
     printf '  "controls": ['
     for id in "${R_IDS[@]}"; do
         ((first)) || printf ','

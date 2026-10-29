@@ -263,6 +263,29 @@ else
     fail "a symlink at the report path is replaced, not followed"
 fi
 
+echo "Scenario: harden safety (nothing here changes the system)"
+out=$("$AUDIT" harden --dry-run --no-color 2>&1)
+rc=$?
+if ((rc == 0)); then ok "harden --dry-run exits 0"; else fail "harden --dry-run exits 0 (got $rc)"; fi
+expect "dry run says so"                     "$out" 'DRY RUN \(nothing will be changed\)'
+expect "dry run ends with a summary"         "$out" '^Dry run: nothing was changed\.'
+out=$(su -s /bin/bash nobody -c "\"$AUDIT\" harden --no-color" 2>&1)
+rc=$?
+if ((rc == 2)); then ok "harden as non-root is refused"; else fail "harden as non-root is refused (got $rc)"; fi
+expect "non-root refusal points to --dry-run" "$out" 'harden --dry-run'
+out=$(su -s /bin/bash nobody -c "\"$AUDIT\" harden --dry-run --no-color" 2>&1)
+rc=$?
+if ((rc == 0)); then ok "harden --dry-run works without root"; else fail "harden --dry-run works without root (got $rc)"; fi
+out=$("$AUDIT" harden --only SSH-3 --no-color < /dev/null 2>&1)
+rc=$?
+if ((rc == 2)); then ok "harden without a terminal or --yes is refused"; else fail "harden without a terminal or --yes is refused (got $rc)"; fi
+"$AUDIT" audit --dry-run >/dev/null 2>&1
+rc=$?
+if ((rc == 2)); then ok "harden options are rejected for audit"; else fail "harden options are rejected for audit (got $rc)"; fi
+"$AUDIT" harden --dry-run --only NOPE-1 >/dev/null 2>&1
+rc=$?
+if ((rc == 2)); then ok "unknown control ID is rejected"; else fail "unknown control ID is rejected (got $rc)"; fi
+
 echo "Scenario: read-only guarantee (strace)"
 if command -v strace >/dev/null; then
     bad=$(mutating_syscalls "" "$AUDIT" --no-color)
@@ -277,6 +300,13 @@ if command -v strace >/dev/null; then
         ok "audit --report: writes only inside the report directory"
     else
         fail "audit --report: writes outside the report directory:"
+        printf '        %s\n' "$bad" | head -20
+    fi
+    bad=$(mutating_syscalls "" "$AUDIT" harden --dry-run --no-color)
+    if [[ -z $bad ]]; then
+        ok "harden --dry-run: no file writes or mutating syscalls"
+    else
+        fail "harden --dry-run: mutating syscalls found:"
         printf '        %s\n' "$bad" | head -20
     fi
 else

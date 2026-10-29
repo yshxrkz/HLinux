@@ -64,3 +64,28 @@ check_file_permissions() {
     check_file_perms FILE-4 /etc/gshadow 640 root "root shadow" "$shadow_group" "$shadow_mode" \
         "/etc/gshadow contains group password hashes and administrator lists."
 }
+
+# file_fix_spec ID - prints "PATH OWNER GROUP MODE": the state the fix sets.
+file_fix_spec() {
+    local shadow_group=root shadow_mode=0000
+    if getent group shadow >/dev/null 2>&1; then
+        shadow_group=shadow shadow_mode=0640
+    fi
+    case $1 in
+        FILE-1) echo "/etc/passwd root root 0644" ;;
+        FILE-2) echo "/etc/shadow root $shadow_group $shadow_mode" ;;
+        FILE-3) echo "/etc/group root root 0644" ;;
+        FILE-4) echo "/etc/gshadow root $shadow_group $shadow_mode" ;;
+        *)      return 1 ;;
+    esac
+}
+
+# fix_file_perms ID - harden mode: set owner, group and mode.
+fix_file_perms() {
+    local path owner group mode
+    read -r path owner group mode < <(file_fix_spec "$1") || return "$RC_MANUAL"
+    ((APPLY)) && ensure_backup_dir
+    act_note "$path is currently $(stat -Lc '%a %U:%G' "$path")"
+    act_run chown "$owner:$group" "$path" || return "$RC_FAILED"
+    act_run chmod "$mode" "$path" || return "$RC_FAILED"
+}

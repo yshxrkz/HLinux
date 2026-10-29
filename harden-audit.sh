@@ -5,6 +5,8 @@
 #
 #   audit   (default) Check every control and print PASS / FAIL / SKIP with an
 #           explanation and a suggested fix, plus a weighted hardening score.
+#   harden  Fix failing controls - each fix is shown first and applied only
+#           after you confirm it. --dry-run shows the plan and changes nothing.
 #   list    Show the controls, their severity and category.
 #
 # READ-ONLY GUARANTEE (audit, list): the audit never changes the system. It
@@ -16,9 +18,11 @@
 # could load kernel modules.
 #
 # Usage: sudo ./harden-audit.sh [audit] [--quiet] [--no-color] [--report FILE]
+#        sudo ./harden-audit.sh harden [--dry-run] [--yes] [--only IDS] [--skip IDS]
 #        ./harden-audit.sh list
 #
-# Exit status: 0 = no FAIL results, 1 = at least one FAIL, 2 = usage error.
+# Exit status: 0 = no FAIL results (dry run: always 0), 1 = at least one FAIL,
+#              2 = usage error or refused to run.
 
 set -u
 export LC_ALL=C
@@ -36,6 +40,8 @@ readonly HLINUX_LIB="$HLINUX_ROOT/lib"
 source "$HLINUX_LIB/common.sh"
 # shellcheck source=lib/report.sh
 source "$HLINUX_LIB/report.sh"
+# shellcheck source=lib/harden.sh
+source "$HLINUX_LIB/harden.sh"
 # Controls register themselves in the order they are sourced, which is also
 # the order they are audited, listed and hardened in.
 # shellcheck source=lib/controls/ssh.sh
@@ -57,24 +63,36 @@ usage() {
     printf '%s\n' \
         "Usage: harden-audit.sh [COMMAND] [OPTIONS]" \
         "" \
-        "Audit a Linux host against CIS-benchmark-style hardening controls." \
+        "Audit a Linux host against CIS-benchmark-style hardening controls, and" \
+        "optionally fix what fails." \
         "" \
         "Commands:" \
-        "  audit            Check every control and report PASS/FAIL/SKIP (default)." \
-        "                   Read-only: never changes the system." \
-        "  list             List the controls with their severity and category." \
+        "  audit              Check every control and report PASS/FAIL/SKIP (default)." \
+        "                     Read-only: never changes the system." \
+        "  harden             Fix failing controls. Each fix is shown first and applied" \
+        "                     only after you confirm it. Needs root." \
+        "  list               List the controls with their severity and category." \
         "" \
         "Options:" \
-        "  -q, --quiet      Only print FAIL and SKIP results (plus the summary)" \
-        "  -r, --report FILE  Also write a report; format from the extension" \
-        "                   (.md, .html or .json) unless --format is given" \
-        "      --format FMT Report format: md, html or json" \
-        "      --no-color   Disable coloured output (also honours NO_COLOR)" \
-        "  -h, --help       Show this help and exit" \
-        "  -V, --version    Show version and exit" \
+        "  -q, --quiet        Only print FAIL and SKIP results (plus the summary)" \
+        "  -r, --report FILE  Also write a report; the format comes from the extension" \
+        "                     (.md, .html or .json) unless --format is given" \
+        "      --format FMT   Report format: md, html or json" \
+        "      --no-color     Disable coloured output (also honours NO_COLOR)" \
+        "  -h, --help         Show this help and exit" \
+        "  -V, --version      Show version and exit" \
         "" \
-        "Run as root for complete results; some checks are skipped otherwise." \
-        "Exit status: 0 if nothing failed, 1 if any check failed, 2 on usage error."
+        "Harden options:" \
+        "  -n, --dry-run      Show every planned change; change nothing (no root needed)" \
+        "  -y, --yes          Apply every fix without asking (for automation)" \
+        "      --only IDS     Only fix these controls, e.g. --only SSH-1,FW-1" \
+        "      --skip IDS     Never touch these controls" \
+        "" \
+        "WARNING: harden changes system configuration. Try it on a VM or snapshot" \
+        "first. Changed files are backed up under /var/backups/harden-audit/." \
+        "" \
+        "Exit status: 0 if nothing failed, 1 if any check failed, 2 on usage error." \
+        "A dry run exits 0."
 }
 
 # ---------------------------------------------------------------------------
@@ -161,9 +179,9 @@ REPORT_FILE=""
 REPORT_FORMAT=""
 
 main() {
-    local cmd=audit
+    local cmd=audit harden_opt=""
     case ${1:-} in
-        audit|list) cmd=$1; shift ;;
+        audit|harden|list) cmd=$1; shift ;;
         help)       usage; return 0 ;;
     esac
     while (($#)); do
@@ -178,6 +196,14 @@ main() {
                 [[ -n ${2:-} ]] || { echo "$1 needs md, html or json" >&2; return 2; }
                 REPORT_FORMAT=$2; shift ;;
             --format=*)    REPORT_FORMAT=${1#*=} ;;
+            -n|--dry-run)  HARDEN_DRY_RUN=1; harden_opt=$1 ;;
+            -y|--yes)      HARDEN_YES=1; harden_opt=$1 ;;
+            --only|--skip)
+                [[ -n ${2:-} ]] || { echo "$1 needs a comma-separated list of control IDs" >&2; return 2; }
+                validate_id_list "$2" || return 2
+                if [[ $1 == --only ]]; then HARDEN_ONLY=$2; else HARDEN_SKIP=$2; fi
+                harden_opt=$1
+                shift ;;
             -h|--help)     usage; return 0 ;;
             -V|--version)  echo "harden-audit.sh $VERSION"; return 0 ;;
             *)             echo "Unknown option: $1" >&2; usage >&2; return 2 ;;
@@ -185,6 +211,10 @@ main() {
         shift
     done
 
+    if [[ -n $harden_opt && $cmd != harden ]]; then
+        echo "$harden_opt is only valid with the harden command" >&2
+        return 2
+    fi
     if [[ -n $REPORT_FILE ]]; then
         REPORT_FORMAT=$(report_format_for "$REPORT_FILE" "$REPORT_FORMAT") || {
             echo "Unknown report format for '$REPORT_FILE': use a .md, .html or .json file name, or --format md|html|json" >&2
@@ -198,8 +228,9 @@ main() {
     setup_colors
     detect_os
     case $cmd in
-        audit) cmd_audit ;;
-        list)  cmd_list ;;
+        audit)  cmd_audit ;;
+        harden) cmd_harden ;;
+        list)   cmd_list ;;
     esac
 }
 
