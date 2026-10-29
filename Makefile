@@ -5,12 +5,13 @@
 SHELL_FILES := harden-audit.sh $(wildcard lib/*.sh lib/controls/*.sh tests/*.sh docker/*.sh)
 IMAGE       ?= harden-audit-demo
 
-.PHONY: help lint test test-docker demo audit clean
+.PHONY: help lint test test-docker test-rocky demo audit clean
 
 help:
 	@echo "make lint         shellcheck, hadolint and actionlint"
 	@echo "make test         host tests (read-only; needs root: sudo make test)"
 	@echo "make test-docker  build the demo container and run the end-to-end tests in it"
+	@echo "make test-rocky   smoke-test the RHEL-family code paths in a Rocky Linux 9 container"
 	@echo "make demo         audit -> harden -> audit inside the demo container"
 	@echo "make audit        audit this machine (read-only) and write reports/audit.html"
 
@@ -24,6 +25,9 @@ test:
 
 test-docker:
 	tests/docker-test.sh reports
+
+test-rocky:
+	tests/rocky-smoke.sh
 
 demo:
 	docker build --tag $(IMAGE) .

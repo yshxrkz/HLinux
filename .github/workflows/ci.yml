@@ -103,3 +103,15 @@ jobs:
           name: demo-reports
           path: reports/
           if-no-files-found: ignore
+
+  rhel-smoke:
+    name: RHEL-family smoke test (Rocky Linux 9 container)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Audit and harden a Rocky Linux 9 container
+        run: tests/rocky-smoke.sh
+
