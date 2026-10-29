@@ -89,6 +89,22 @@ join() {
     printf '%s' "$out"
 }
 
+# pkg_install_hint PACKAGE... - the install command for this distribution.
+pkg_install_hint() {
+    case $OS_FAMILY in
+        debian) echo "sudo apt install $*" ;;
+        rhel)   echo "sudo dnf install $*" ;;
+        suse)   echo "sudo zypper install $*" ;;
+        arch)   echo "sudo pacman -S $*" ;;
+        *)      echo "Install the package(s): $*" ;;
+    esac
+}
+
+# service_enable_hint UNIT - the command that enables and starts a service.
+service_enable_hint() {
+    echo "sudo systemctl enable --now $1"
+}
+
 section() {
     ((QUIET || SILENT)) && return 0
     printf '\n%s== %s ==%s\n' "$C_BOLD" "$1" "$C_OFF"

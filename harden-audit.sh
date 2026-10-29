@@ -47,6 +47,8 @@ source "$HLINUX_LIB/controls/services.sh"
 source "$HLINUX_LIB/controls/files.sh"
 # shellcheck source=lib/controls/updates.sh
 source "$HLINUX_LIB/controls/updates.sh"
+# shellcheck source=lib/controls/auditd.sh
+source "$HLINUX_LIB/controls/auditd.sh"
 
 usage() {
     printf '%s\n' \
@@ -83,6 +85,7 @@ run_audit() {
     check_services
     check_file_permissions
     check_updates
+    check_auditd
     compute_score
 }
 
