@@ -78,6 +78,8 @@ cat > "$FIX/secure/sshd_config.d/00-hardening.conf" <<'EOF'
 PermitRootLogin=no
   passwordauthentication   "no"
 KbdInteractiveAuthentication no
+MaxAuthTries 3
+X11Forwarding no
 EOF
 
 # Insecure SSH
@@ -86,6 +88,8 @@ Include /etc/ssh/sshd_config.d/*.conf
 PermitRootLogin yes
 UsePAM yes
 PermitEmptyPasswords yes
+MaxAuthTries 10
+X11Forwarding yes
 EOF
 
 # Secure globally, but a Match block re-enables root and password logins
@@ -96,6 +100,7 @@ KbdInteractiveAuthentication no
 Match Address 10.0.0.0/8
     PermitRootLogin yes
     PasswordAuthentication yes
+    X11Forwarding yes
 EOF
 
 printf 'PASS_MAX_DAYS\t365\nPASS_MIN_DAYS\t1\nPASS_WARN_AGE\t7\n' > "$FIX/login.defs.good"
@@ -121,6 +126,8 @@ if [[ -e /etc/ssh/sshd_config ]]; then
     expect "SSH-1 passes"  "$out" '^\[PASS\] SSH-1 '
     expect "SSH-2 passes"  "$out" '^\[PASS\] SSH-2 '
     expect "SSH-3 passes"  "$out" '^\[PASS\] SSH-3 '
+    expect "SSH-4 passes"  "$out" '^\[PASS\] SSH-4 '
+    expect "SSH-5 passes"  "$out" '^\[PASS\] SSH-5 '
     expect "AUTH-1 passes" "$out" '^\[PASS\] AUTH-1 '
 else
     echo "  (skipped: OpenSSH server not installed, nothing to bind-mount over)"
@@ -138,6 +145,8 @@ if [[ -e /etc/ssh/sshd_config ]]; then
     expect "SSH-2 fails on default PasswordAuth"       "$out" '^\[FAIL\] SSH-2 '
     expect "SSH-2 explains PAM keyboard-interactive"   "$out" 'KbdInteractiveAuthentication is .yes. with UsePAM'
     expect "SSH-3 fails on PermitEmptyPasswords yes"   "$out" '^\[FAIL\] SSH-3 '
+    expect "SSH-4 fails on MaxAuthTries 10"            "$out" "MaxAuthTries is '10'"
+    expect "SSH-5 fails on X11Forwarding yes"          "$out" '^\[FAIL\] SSH-5 '
 fi
 expect "AUTH-1 fails on PASS_MAX_DAYS 99999"       "$out" "PASS_MAX_DAYS is '99999'"
 expect "AUTH-1 reports missing PASS_WARN_AGE"      "$out" "PASS_WARN_AGE is 'unset'"
@@ -157,6 +166,7 @@ if [[ -e /etc/ssh/sshd_config ]]; then
     out=$(run_in_ns "$FIX/match/sshd_config:/etc/ssh/sshd_config $FIX/match/sshd_config.d:/etc/ssh/sshd_config.d")
     expect "SSH-1 fails because of Match block" "$out" 'Match Address 10.0.0.0/8" sets PermitRootLogin yes'
     expect "SSH-2 fails because of Match block" "$out" 'Match Address 10.0.0.0/8" sets PasswordAuthentication yes'
+    expect "SSH-5 fails because of Match block" "$out" 'Match Address 10.0.0.0/8" sets X11Forwarding yes'
 fi
 
 echo "Scenario: insecure service running (fake 'vsftpd' process)"

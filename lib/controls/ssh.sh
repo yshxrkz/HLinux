@@ -17,6 +17,12 @@ register_control SSH-2 high SSH fix_ssh_password_auth \
 register_control SSH-3 high SSH fix_ssh_empty_passwords \
     "SSH does not allow empty passwords" \
     "With PermitEmptyPasswords enabled, any account without a password is a remote shell for anyone who guesses the user name."
+register_control SSH-4 medium SSH fix_ssh_max_auth_tries \
+    "SSH limits authentication attempts (MaxAuthTries <= 4)" \
+    "MaxAuthTries caps how many passwords or keys a client may try per connection. A low limit slows brute-force attacks and makes them stand out in the logs."
+register_control SSH-5 low SSH fix_ssh_x11_forwarding \
+    "SSH X11 forwarding is disabled" \
+    "X11 forwarding lets the server reach back into the admin's graphical desktop. A compromised server could then log keystrokes or take screenshots on the admin's machine. Servers almost never need it."
 
 declare -A SSHD=()
 SSHD_SOURCE=""
@@ -125,20 +131,20 @@ ssh_match_overrides() {
 
 check_ssh() {
     section "1. SSH server"
-    local rc where reload val pa kbd pam overrides reasons=()
+    local rc id where reload val pa kbd pam overrides reasons=()
     load_sshd_config
     rc=$?
     if ((rc == 1)); then
-        report PASS SSH-1 "SSH root login is disabled" "No OpenSSH server is installed, so remote SSH logins are not possible."
-        report PASS SSH-2 "SSH password authentication is disabled" "No OpenSSH server is installed."
-        report PASS SSH-3 "SSH does not allow empty passwords" "No OpenSSH server is installed."
+        for id in SSH-1 SSH-2 SSH-3 SSH-4 SSH-5; do
+            report PASS "$id" "${CTL_TITLE[$id]}" "No OpenSSH server is installed, so remote SSH logins are not possible."
+        done
         return
     elif ((rc == 2)); then
         local msg
         msg="Cannot read $SSHD_CONFIG as $(id -un)."
-        report SKIP SSH-1 "SSH root login is disabled" "$msg" "Re-run this audit as root (sudo)."
-        report SKIP SSH-2 "SSH password authentication is disabled" "$msg" "Re-run this audit as root (sudo)."
-        report SKIP SSH-3 "SSH does not allow empty passwords" "$msg" "Re-run this audit as root (sudo)."
+        for id in SSH-1 SSH-2 SSH-3 SSH-4 SSH-5; do
+            report SKIP "$id" "${CTL_TITLE[$id]}" "$msg" "Re-run this audit as root (sudo)."
+        done
         return
     fi
     where=$(ssh_fix_location)
@@ -199,5 +205,32 @@ Log in as a normal user and use sudo instead. Then: $reload"
         report FAIL SSH-3 "SSH does not allow empty passwords" \
             "PermitEmptyPasswords is '$val' ($SSHD_SOURCE). Accounts without a password can log in remotely." \
             "Add 'PermitEmptyPasswords no' to $where. Then: $reload"
+    fi
+
+    # SSH-4: MaxAuthTries (CIS: "Ensure sshd MaxAuthTries is set to 4 or less")
+    val=${SSHD[maxauthtries]:-6}
+    if [[ $val =~ ^[0-9]+$ ]] && ((val <= 4)); then
+        report PASS SSH-4 "${CTL_TITLE[SSH-4]}" "MaxAuthTries is $val ($SSHD_SOURCE)."
+    else
+        report FAIL SSH-4 "${CTL_TITLE[SSH-4]}" \
+            "MaxAuthTries is '$val' ($SSHD_SOURCE). Each connection may try that many passwords or keys before being dropped." \
+            "Add 'MaxAuthTries 4' to $where. Then: $reload"
+    fi
+
+    # SSH-5: X11Forwarding (CIS: "Ensure sshd X11Forwarding is disabled")
+    val=${SSHD[x11forwarding]:-no}
+    overrides=$(ssh_match_overrides x11forwarding no)
+    if [[ $val == no && -z $overrides ]]; then
+        report PASS SSH-5 "${CTL_TITLE[SSH-5]}" "X11Forwarding is '$val' ($SSHD_SOURCE)."
+    elif [[ $val == no ]]; then
+        report FAIL SSH-5 "${CTL_TITLE[SSH-5]}" \
+            "X11Forwarding is 'no' globally, but a Match block enables it for some connections:"$'\n'"$overrides" \
+            "Remove 'X11Forwarding yes' from those Match blocks. Then: $reload"
+    else
+        local note=""
+        [[ $OS_FAMILY == debian ]] && note=" Debian and Ubuntu enable it in their default sshd_config."
+        report FAIL SSH-5 "${CTL_TITLE[SSH-5]}" \
+            "X11Forwarding is '$val' ($SSHD_SOURCE).$note" \
+            "Add 'X11Forwarding no' to $where. Then: $reload"
     fi
 }
