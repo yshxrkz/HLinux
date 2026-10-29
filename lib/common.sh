@@ -74,6 +74,12 @@ is_root() { [[ $EUID -eq 0 ]]; }
 # True when systemd is the running init system (same test as sd_booted(3)).
 has_systemd() { [[ -d /run/systemd/system ]] && have systemctl; }
 
+# True inside a container (Docker, Podman, LXC, systemd-nspawn, ...).
+in_container() {
+    [[ -e /.dockerenv || -e /run/.containerenv || -n ${container:-} ]] && return 0
+    have systemd-detect-virt && systemd-detect-virt --quiet --container
+}
+
 trim() {
     local s=$1
     s=${s#"${s%%[![:space:]]*}"}

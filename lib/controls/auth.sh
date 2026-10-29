@@ -102,6 +102,9 @@ This only affects NEW accounts. For existing ones run, per user: sudo chage --ma
     check_password_quality
 }
 
+# Where harden mode sets minlen (pwquality reads *.conf here after pwquality.conf).
+readonly PWQUALITY_DROPIN=/etc/security/pwquality.conf.d/50-hardening.conf
+
 # PAM files where the "password" stack lives (Debian, then RHEL-style).
 readonly PAM_PASSWORD_FILES=(/etc/pam.d/common-password /etc/pam.d/system-auth /etc/pam.d/password-auth)
 
@@ -125,17 +128,27 @@ pwquality_minlen() {
 
 # AUTH-3: pam_pwquality must be in the PAM password stack with minlen >= 14
 # (CIS: "Ensure password creation requirements are configured").
-check_password_quality() {
-    local f line pam_file="" pam_line="" minlen="" src=""
+# pwquality_pam_line - prints "FILE<TAB>LINE" for the first pam_pwquality
+# line in the PAM password stack, or nothing.
+pwquality_pam_line() {
+    local f line
     for f in "${PAM_PASSWORD_FILES[@]}"; do
         [[ -r $f ]] || continue
         while IFS= read -r line || [[ -n $line ]]; do
             if [[ $line =~ ^[[:space:]]*password[[:space:]].*pam_pwquality\.so ]]; then
-                pam_file=$f pam_line=$line
-                break 2
+                printf '%s\t%s' "$f" "$line"
+                return 0
             fi
         done < "$f"
     done
+}
+
+check_password_quality() {
+    local found pam_file="" pam_line="" minlen="" src=""
+    found=$(pwquality_pam_line)
+    if [[ -n $found ]]; then
+        pam_file=${found%%$'\t'*} pam_line=${found#*$'\t'}
+    fi
 
     if [[ -z $pam_file ]]; then
         local fix
@@ -144,7 +157,7 @@ check_password_quality() {
             rhel)   fix="pam_pwquality is part of the standard authselect profiles: check 'authselect current' and re-select your profile" ;;
             *)      fix="Add 'password requisite pam_pwquality.so retry=3' to the PAM password stack." ;;
         esac
-        fix+=$'\n'"Then set 'minlen = 14' in /etc/security/pwquality.conf.d/50-hardening.conf."
+        fix+=$'\n'"Then set 'minlen = 14' in $PWQUALITY_DROPIN."
         report FAIL AUTH-3 "${CTL_TITLE[AUTH-3]}" \
             "pam_pwquality is not enabled in the PAM password stack (looked in ${PAM_PASSWORD_FILES[*]}), so only pam_unix's basic length check applies." \
             "$fix"
@@ -165,7 +178,7 @@ check_password_quality() {
     else
         report FAIL AUTH-3 "${CTL_TITLE[AUTH-3]}" \
             "pam_pwquality is enabled in $pam_file, but minlen is $minlen (from $src); it should be at least 14." \
-            "Set 'minlen = 14' in /etc/security/pwquality.conf.d/50-hardening.conf (or remove a smaller minlen= from the PAM line)."
+            "Set 'minlen = 14' in $PWQUALITY_DROPIN (or remove a smaller minlen= from the PAM line)."
     fi
 }
 
@@ -205,4 +218,31 @@ fix_empty_passwords() {
     done
     [[ -n $empty ]] && act_note "locked: $empty. Root can still use them via su/sudo -u; set a password with 'passwd USER' if one needs to log in."
     return "$RC_OK"
+}
+
+# fix_password_quality - make sure pam_pwquality is in the PAM stack (on
+# Debian/Ubuntu installing libpam-pwquality adds it via pam-auth-update) and
+# set minlen = 14 in a drop-in, leaving the distribution's file untouched.
+fix_password_quality() {
+    local found pam_line
+    found=$(pwquality_pam_line)
+    pam_line=${found#*$'\t'}
+    if [[ -z $found ]]; then
+        if [[ $OS_FAMILY != debian ]]; then
+            step manual "add pam_pwquality to the PAM password stack (RHEL family: re-select your authselect profile), then re-run"
+            return "$RC_MANUAL"
+        fi
+        act_pkg_install libpam-pwquality || return
+    elif [[ $pam_line =~ minlen=([0-9]+) ]] && ((BASH_REMATCH[1] < 14)); then
+        step manual "minlen=${BASH_REMATCH[1]} is set on the pam_pwquality line in ${found%%$'\t'*}, which overrides pwquality.conf; change it there"
+        return "$RC_MANUAL"
+    fi
+    act_write_file "$PWQUALITY_DROPIN" 644 \
+        "$(printf '%s\n' '# Added by harden-audit.sh (AUTH-3): minimum password length.' 'minlen = 14')" \
+        || return "$RC_FAILED"
+    if ((APPLY)) && [[ -z $(pwquality_pam_line) ]]; then
+        step fail "pam_pwquality is still not in the PAM password stack"
+        return "$RC_FAILED"
+    fi
+    act_note "applies when a password is next set or changed"
 }

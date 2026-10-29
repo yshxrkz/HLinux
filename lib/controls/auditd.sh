@@ -15,6 +15,7 @@ register_control AUD-2 medium Auditing fix_audit_rules \
 # Optional files are only required when they exist on this host.
 readonly AUDIT_REQUIRED_WATCHES=(/etc/passwd /etc/shadow /etc/group /etc/gshadow)
 readonly AUDIT_OPTIONAL_WATCHES=(/etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config)
+readonly AUDIT_RULES_FILE=/etc/audit/rules.d/50-hardening.rules
 
 auditd_installed() { have auditd || [[ -x /sbin/auditd ]]; }
 
@@ -39,7 +40,11 @@ check_auditd() {
     pkg=$(audit_package_name)
 
     # AUD-1: auditd installed, running (and enabled at boot under systemd)
-    if ! auditd_installed; then
+    if in_container; then
+        report SKIP AUD-1 "${CTL_TITLE[AUD-1]}" \
+            "This is a container. auditd needs the host kernel's audit subsystem and cannot run inside a container; the host should run it." \
+            "Run this audit on the container host (or a VM) to check auditd."
+    elif ! auditd_installed; then
         report FAIL AUD-1 "${CTL_TITLE[AUD-1]}" \
             "The audit daemon is not installed, so no security events are being recorded." \
             "$(pkg_install_hint "$pkg")"$'\n'"$(service_enable_hint auditd)"
@@ -81,9 +86,44 @@ check_auditd() {
         detail="Not watched ($source): $(join ', ' "${missing[@]}")."
         auditd_installed || detail+=" auditd is not installed (see AUD-1)."
         report FAIL AUD-2 "${CTL_TITLE[AUD-2]}" "$detail" \
-"Create /etc/audit/rules.d/50-hardening.rules with one line per file, e.g.
+"Create $AUDIT_RULES_FILE with one line per file, e.g.
   -w /etc/passwd -p wa -k identity
   -w /etc/sudoers -p wa -k scope
 Then load the rules: sudo augenrules --load"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Fixes (harden mode)
+# ---------------------------------------------------------------------------
+
+fix_auditd_service() {
+    act_pkg_install "$(audit_package_name)" || return
+    act_service_enable auditd || return
+    if ((APPLY)) && ! auditd_running; then
+        step fail "auditd is installed but did not start; see: journalctl -u auditd"
+        return "$RC_FAILED"
+    fi
+}
+
+# fix_audit_rules - watch rules in their own file under rules.d, loaded
+# with augenrules when auditd is running.
+fix_audit_rules() {
+    local path key content
+    content="## Added by harden-audit.sh (AUD-2): record every change to account,"$'\n'"## sudo and SSH configuration. Search with: ausearch -k identity"
+    for path in "${AUDIT_REQUIRED_WATCHES[@]}" "${AUDIT_OPTIONAL_WATCHES[@]}"; do
+        [[ -e $path ]] || continue
+        case $path in
+            /etc/sudoers*) key=scope ;;
+            /etc/ssh/*)    key=sshd ;;
+            *)             key=identity ;;
+        esac
+        content+=$'\n'"-w $path -p wa -k $key"
+    done
+    act_write_file "$AUDIT_RULES_FILE" 640 "$content" || return "$RC_FAILED"
+    if auditd_running && have augenrules; then
+        act_run augenrules --load || return "$RC_FAILED"
+    else
+        act_note "auditd is not running; the rules load when it starts (or run: augenrules --load)"
     fi
 }

@@ -86,3 +86,51 @@ and only allows the services you need (e.g. SSH)." ;;
         report FAIL FW-1 "A host firewall is active" "$detail Every listening service is reachable from the network." "$fix"
     fi
 }
+
+# ssh_port - the port sshd listens on (22 unless configured otherwise).
+ssh_port() {
+    local port
+    load_sshd_config >/dev/null 2>&1
+    port=${SSHD[port]:-22}
+    [[ $port =~ ^[0-9]+$ ]] || port=22
+    printf '%s' "$port"
+}
+
+# fix_firewall - default-deny incoming, but always allow SSH first so the
+# change cannot cut off the session that is applying it.
+fix_firewall() {
+    local port="" ssh_installed=0
+    if have sshd || [[ -e $SSHD_CONFIG ]]; then
+        ssh_installed=1
+        port=$(ssh_port)
+    fi
+    case $OS_FAMILY in
+        debian)
+            act_pkg_install ufw || return
+            if ((ssh_installed)); then
+                act_run ufw allow "$port/tcp" comment 'SSH (harden-audit.sh)' || return "$RC_FAILED"
+            fi
+            act_run ufw default deny incoming || return "$RC_FAILED"
+            act_run ufw default allow outgoing || return "$RC_FAILED"
+            act_run ufw --force enable || return "$RC_FAILED"
+            if ((ssh_installed)); then
+                act_note "only SSH (port $port) is allowed in. Open anything else this host serves with: ufw allow PORT/tcp"
+            else
+                act_note "no incoming connections are allowed. Open what this host serves with: ufw allow PORT/tcp"
+            fi
+            ;;
+        rhel|suse)
+            act_pkg_install firewalld || return
+            act_service_enable firewalld || return
+            if ((ssh_installed)) && [[ $port != 22 ]]; then
+                act_run firewall-cmd --permanent --add-port="$port/tcp" || return "$RC_FAILED"
+                act_run firewall-cmd --reload || return "$RC_FAILED"
+            fi
+            act_note "firewalld's default zone allows SSH and DHCPv6-client only. Open other services with: firewall-cmd --permanent --add-service=NAME"
+            ;;
+        *)
+            step manual "enable a default-deny firewall with your distribution's tools (ufw, firewalld or nftables), allowing SSH first"
+            return "$RC_MANUAL"
+            ;;
+    esac
+}

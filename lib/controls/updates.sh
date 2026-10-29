@@ -42,7 +42,7 @@ check_updates_debian() {
 }
 
 check_updates_rhel() {
-    local timer t state conf apply="" detail
+    local timer t state conf apply_conf="" detail
     if has_systemd; then
         for t in dnf-automatic-install.timer dnf-automatic.timer dnf5-automatic.timer yum-cron.service; do
             state=$(systemctl is-enabled "$t" 2>/dev/null)
@@ -66,12 +66,12 @@ sudo systemctl enable --now dnf-automatic.timer"
     fi
     for conf in /etc/dnf/dnf5-plugins/automatic.conf /etc/dnf/automatic.conf /etc/yum/yum-cron.conf; do
         if [[ -r $conf ]] && grep -Eiq '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)[[:space:]]*$' "$conf"; then
-            apply=$conf
+            apply_conf=$conf
             break
         fi
     done
-    if [[ -n $apply ]]; then
-        report PASS UPD-1 "Automatic security updates are enabled" "$timer is enabled and apply_updates = yes in $apply."
+    if [[ -n $apply_conf ]]; then
+        report PASS UPD-1 "Automatic security updates are enabled" "$timer is enabled and apply_updates = yes in $apply_conf."
     else
         detail="$timer is enabled, but apply_updates is not 'yes', so updates are only downloaded/announced, never installed."
         report FAIL UPD-1 "Automatic security updates are enabled" "$detail" \
@@ -88,6 +88,43 @@ check_updates() {
             report SKIP UPD-1 "Automatic security updates are enabled" \
                 "Automatic update detection is not implemented for '$OS_NAME'." \
                 "Check manually: SUSE uses 'zypper patch' via a systemd timer or yast2-online-update-configuration; Arch has no supported unattended mechanism - update regularly with 'pacman -Syu'."
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Fix (harden mode)
+# ---------------------------------------------------------------------------
+
+fix_auto_updates() {
+    case $OS_FAMILY in
+        debian)
+            act_pkg_install unattended-upgrades || return
+            # The same file "dpkg-reconfigure unattended-upgrades" writes.
+            act_write_file /etc/apt/apt.conf.d/20auto-upgrades 644 \
+                "$(printf '%s\n' 'APT::Periodic::Update-Package-Lists "1";' 'APT::Periodic::Unattended-Upgrade "1";')" \
+                || return "$RC_FAILED"
+            if has_systemd; then
+                act_run systemctl enable --now apt-daily.timer apt-daily-upgrade.timer || return "$RC_FAILED"
+            fi
+            act_note "unattended-upgrades installs security updates by default; see /etc/apt/apt.conf.d/50unattended-upgrades (e.g. Automatic-Reboot)"
+            ;;
+        rhel)
+            act_pkg_install dnf-automatic || return
+            # dnf4 ships a timer that downloads AND installs; otherwise turn
+            # on apply_updates for the generic timer.
+            if ((!APPLY)); then
+                step plan "systemctl enable --now dnf-automatic-install.timer   (or, where that timer does not exist: set 'apply_updates = yes' in /etc/dnf/automatic.conf and enable dnf-automatic.timer)"
+            elif systemctl cat dnf-automatic-install.timer >/dev/null 2>&1; then
+                act_run systemctl enable --now dnf-automatic-install.timer || return "$RC_FAILED"
+            else
+                act_set_option /etc/dnf/automatic.conf apply_updates yes ' = ' || return "$RC_FAILED"
+                act_run systemctl enable --now dnf-automatic.timer || return "$RC_FAILED"
+            fi
+            ;;
+        *)
+            step manual "set up automatic security updates with your distribution's tools"
+            return "$RC_MANUAL"
             ;;
     esac
 }

@@ -35,9 +35,14 @@ readonly SERVICES=(
     "rsync daemon|rsync.service rsyncd.service|"
 )
 
+# Units the last audit found running, for the fix: systemd units, or (without
+# systemd) the SysV init scripts that belong to the processes found.
+SVC_TO_DISABLE=()
+
 check_services() {
     section "4. Unnecessary services"
     local active_units="" running_procs="" entry desc units procs u p hits=() fixes=() method
+    SVC_TO_DISABLE=()
     if has_systemd; then
         method="active systemd units"
         active_units=" $(systemctl list-units --type=service,socket --state=active --plain --no-legend --no-pager 2>/dev/null \
@@ -56,12 +61,19 @@ check_services() {
                 if [[ $active_units == *" $u "* ]]; then
                     hits+=("$desc [$u]")
                     fixes+=("$u")
+                    SVC_TO_DISABLE+=("$u")
                 fi
             done
         else
             for p in $procs; do
                 if [[ $running_procs == *" $p "* ]]; then
                     hits+=("$desc [process $p]")
+                    for u in $units; do
+                        if [[ -x /etc/init.d/${u%.*} ]]; then
+                            SVC_TO_DISABLE+=("${u%.*}")
+                            break
+                        fi
+                    done
                     break
                 fi
             done
@@ -84,4 +96,19 @@ Better still, uninstall the package that provides it. Keep a service only if thi
         fi
         report FAIL SVC-1 "No unnecessary or insecure services are running" "$detail" "$fix"
     fi
+}
+
+# fix_services - stop and disable what the audit found. There is no way to
+# know whether this host is *meant* to run, say, a DNS server, so the plan
+# says so; decline the fix (or use --skip SVC-1) to keep them.
+fix_services() {
+    local unit
+    if ((${#SVC_TO_DISABLE[@]} == 0)); then
+        step manual "no service unit or init script found for the processes listed; stop them and remove their packages by hand"
+        return "$RC_MANUAL"
+    fi
+    act_note "keep any service this host is supposed to provide: answer 'n' (or use --skip SVC-1) and remove the rest by hand"
+    for unit in "${SVC_TO_DISABLE[@]}"; do
+        act_service_disable "$unit" || return
+    done
 }

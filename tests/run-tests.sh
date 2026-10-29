@@ -164,7 +164,7 @@ expect "FILE-3 reports wrong owner"                "$out" "owner is 'nobody'"
 expect "FILE-3 reports excess mode"                "$out" 'mode is 666, which grants more than 644'
 [[ -e /etc/apt/apt.conf.d/20auto-upgrades ]] && \
     expect "UPD-1 fails when Unattended-Upgrade is 0" "$out" "Unattended-Upgrade is '0'"
-expect "AUD-1 and AUD-2 are evaluated"            "$(grep -cE '^\[(PASS|FAIL)\] AUD-[12] ' <<<"$out")" '^2$'
+expect "AUD-1 and AUD-2 are reported"             "$(grep -cE '^\[(PASS|FAIL|SKIP)\] AUD-[12] ' <<<"$out")" '^2$'
 expect "exit code is 1 when a check fails"         "$out" '^EXIT=1$'
 expect "every FAIL has a Fix line" \
     "$(awk '/^\[FAIL\]/{f=1; next} f && /Fix:/{f=0} /^\[/{ if (f) print "MISSING"; f=0 } END { if (f) print "MISSING"; else print "all-good" }' <<<"$out")" '^all-good$'
