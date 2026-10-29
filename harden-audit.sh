@@ -10,11 +10,12 @@
 # READ-ONLY GUARANTEE (audit, list): the audit never changes the system. It
 # only reads files and runs inspection commands (stat, sshd -T, systemctl
 # is-active, nft list ruleset, apt-config dump, ...). It writes nothing to
-# disk - it even avoids bash here-strings/here-docs, which can create temp
-# files - and it never runs package managers, service managers in a mutating
-# mode, or anything that could load kernel modules.
+# disk except the report you ask for with --report - it even avoids bash
+# here-strings/here-docs, which can create temp files - and it never runs
+# package managers, service managers in a mutating mode, or anything that
+# could load kernel modules.
 #
-# Usage: sudo ./harden-audit.sh [audit] [--quiet] [--no-color]
+# Usage: sudo ./harden-audit.sh [audit] [--quiet] [--no-color] [--report FILE]
 #        ./harden-audit.sh list
 #
 # Exit status: 0 = no FAIL results, 1 = at least one FAIL, 2 = usage error.
@@ -33,6 +34,8 @@ readonly HLINUX_LIB="$HLINUX_ROOT/lib"
 
 # shellcheck source=lib/common.sh
 source "$HLINUX_LIB/common.sh"
+# shellcheck source=lib/report.sh
+source "$HLINUX_LIB/report.sh"
 # Controls register themselves in the order they are sourced, which is also
 # the order they are audited, listed and hardened in.
 # shellcheck source=lib/controls/ssh.sh
@@ -63,6 +66,9 @@ usage() {
         "" \
         "Options:" \
         "  -q, --quiet      Only print FAIL and SKIP results (plus the summary)" \
+        "  -r, --report FILE  Also write a report; format from the extension" \
+        "                   (.md, .html or .json) unless --format is given" \
+        "      --format FMT Report format: md, html or json" \
         "      --no-color   Disable coloured output (also honours NO_COLOR)" \
         "  -h, --help       Show this help and exit" \
         "  -V, --version    Show version and exit" \
@@ -115,10 +121,25 @@ print_summary() {
     fi
 }
 
+# save_report - write the report requested with --report, if any.
+save_report() {
+    [[ -n $REPORT_FILE ]] || return 0
+    REPORT_HOST=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname)
+    REPORT_DATE=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    REPORT_DATE_ISO=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    REPORT_USER=$(id -un)
+    if write_report "$REPORT_FILE" "$REPORT_FORMAT"; then
+        printf 'Report written to %s (%s)\n' "$REPORT_FILE" "$REPORT_FORMAT"
+    else
+        return 1
+    fi
+}
+
 cmd_audit() {
     print_header "Linux hardening audit"
     run_audit
     print_summary
+    save_report || return 2
     ((N_FAIL == 0))
 }
 
@@ -136,6 +157,9 @@ cmd_list() {
 # Main
 # ---------------------------------------------------------------------------
 
+REPORT_FILE=""
+REPORT_FORMAT=""
+
 main() {
     local cmd=audit
     case ${1:-} in
@@ -146,12 +170,30 @@ main() {
         case $1 in
             -q|--quiet)    QUIET=1 ;;
             --no-color)    USE_COLOR=0 ;;
+            -r|--report)
+                [[ -n ${2:-} ]] || { echo "$1 needs a file name" >&2; return 2; }
+                REPORT_FILE=$2; shift ;;
+            --report=*)    REPORT_FILE=${1#*=} ;;
+            --format)
+                [[ -n ${2:-} ]] || { echo "$1 needs md, html or json" >&2; return 2; }
+                REPORT_FORMAT=$2; shift ;;
+            --format=*)    REPORT_FORMAT=${1#*=} ;;
             -h|--help)     usage; return 0 ;;
             -V|--version)  echo "harden-audit.sh $VERSION"; return 0 ;;
             *)             echo "Unknown option: $1" >&2; usage >&2; return 2 ;;
         esac
         shift
     done
+
+    if [[ -n $REPORT_FILE ]]; then
+        REPORT_FORMAT=$(report_format_for "$REPORT_FILE" "$REPORT_FORMAT") || {
+            echo "Unknown report format for '$REPORT_FILE': use a .md, .html or .json file name, or --format md|html|json" >&2
+            return 2
+        }
+    elif [[ -n $REPORT_FORMAT ]]; then
+        echo "--format needs --report FILE" >&2
+        return 2
+    fi
 
     setup_colors
     detect_os

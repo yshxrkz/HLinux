@@ -210,18 +210,73 @@ out=$("$AUDIT" --quiet --no-color 2>&1)
 if grep -q '^\[PASS\]' <<<"$out"; then fail "--quiet hides PASS lines"; else ok "--quiet hides PASS lines"; fi
 if grep -q $'\e\[' <<<"$out"; then fail "--no-color has no escape codes"; else ok "--no-color has no escape codes"; fi
 
+# mutating_syscalls ALLOWED_DIR CMD... - run CMD under strace and print every
+# open-for-write or other mutating syscall, ignoring /dev/null, the terminal,
+# failed calls and (if not empty) anything under ALLOWED_DIR.
+mutating_syscalls() {
+    local allowed=$1 trace
+    shift
+    trace=$(strace -f -qq -e trace=open,openat,openat2,creat,unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat,rmdir,chmod,fchmod,fchmodat,chown,fchown,fchownat,lchown,truncate,ftruncate,link,linkat,symlink,symlinkat,mknod,mknodat,utimensat,init_module,finit_module,delete_module,reboot,mount,umount2 \
+        "$@" 2>&1 >/dev/null)
+    grep -E 'O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|(^|[] ])(creat|unlink|unlinkat|rename|renameat2?|mkdir|mkdirat|rmdir|f?chmod|fchmodat|[fl]?chown|fchownat|f?truncate|linkat|link|symlinkat|symlink|mknodat|mknod|utimensat|f?init_module|delete_module|reboot|mount|umount2)\(' <<<"$trace" \
+        | grep -Ev '"/dev/(null|tty|pts/[0-9]+)"' \
+        | grep -Ev '= -1 E' \
+        | { if [[ -n $allowed ]]; then grep -Fv "\"$allowed/"; else cat; fi; } || true
+}
+
+echo "Scenario: reports"
+mkdir -p "$FIX/reports"
+for ext in md html json; do
+    "$AUDIT" --quiet --no-color --report "$FIX/reports/r.$ext" >/dev/null 2>&1
+    if [[ -s $FIX/reports/r.$ext ]]; then ok "$ext report written"; else fail "$ext report written"; fi
+    if [[ $(stat -c %a "$FIX/reports/r.$ext") == 600 ]]; then ok "$ext report is mode 600"; else fail "$ext report is mode 600"; fi
+done
+expect "Markdown report has the score heading" "$(cat "$FIX/reports/r.md")" '^## Hardening score: [0-9]+/100 \(grade [A-F]\)'
+expect "Markdown report lists every control" "$(grep -cE '^\| (✅|❌|⚪)' "$FIX/reports/r.md")" "^$("$AUDIT" list | tail -n +2 | wc -l)\$"
+if python3 -m json.tool "$FIX/reports/r.json" >/dev/null 2>&1; then ok "JSON report is valid JSON"; else fail "JSON report is valid JSON"; fi
+expect "JSON report has a numeric score" "$(cat "$FIX/reports/r.json")" '"score": [0-9]+,'
+html_check=$(python3 - "$FIX/reports/r.html" <<'PY'
+import html.parser, sys
+class P(html.parser.HTMLParser):
+    void = {"meta", "br", "link", "img", "input", "hr"}
+    def __init__(self):
+        super().__init__(); self.stack = []; self.errors = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.void: self.stack.append(tag)
+    def handle_endtag(self, tag):
+        if self.stack and self.stack[-1] == tag: self.stack.pop()
+        else: self.errors.append(tag)
+p = P(); p.feed(open(sys.argv[1], encoding="utf-8").read())
+print("balanced" if not p.errors and not p.stack else f"errors={p.errors} unclosed={p.stack}")
+PY
+)
+expect "HTML report tags are balanced (text is escaped)" "$html_check" '^balanced$'
+"$AUDIT" --report "$FIX/reports/r.txt" >/dev/null 2>&1
+rc=$?
+if ((rc == 2)); then ok "unknown report extension exits 2"; else fail "unknown report extension exits 2 (got $rc)"; fi
+echo "do not overwrite" > "$FIX/reports/victim"
+ln -s "$FIX/reports/victim" "$FIX/reports/link.md"
+"$AUDIT" --quiet --report "$FIX/reports/link.md" >/dev/null 2>&1
+if [[ $(cat "$FIX/reports/victim") == "do not overwrite" && -f $FIX/reports/link.md && ! -L $FIX/reports/link.md ]]; then
+    ok "a symlink at the report path is replaced, not followed"
+else
+    fail "a symlink at the report path is replaced, not followed"
+fi
+
 echo "Scenario: read-only guarantee (strace)"
 if command -v strace >/dev/null; then
-    trace=$(strace -f -qq -e trace=open,openat,openat2,creat,unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat,rmdir,chmod,fchmod,fchmodat,chown,fchown,fchownat,lchown,truncate,ftruncate,link,linkat,symlink,symlinkat,mknod,mknodat,utimensat,init_module,finit_module,delete_module,reboot,mount,umount2 \
-        "$AUDIT" --no-color 2>&1 >/dev/null)
-    # Any open for writing/creating, or any mutating syscall, other than /dev/null and the terminal.
-    bad=$(grep -E 'O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|(^|[] ])(creat|unlink|unlinkat|rename|renameat2?|mkdir|mkdirat|rmdir|f?chmod|fchmodat|[fl]?chown|fchownat|f?truncate|linkat|link|symlinkat|symlink|mknodat|mknod|utimensat|f?init_module|delete_module|reboot|mount|umount2)\(' <<<"$trace" \
-          | grep -Ev '"/dev/(null|tty|pts/[0-9]+)"' \
-          | grep -Ev '= -1 E' || true)
+    bad=$(mutating_syscalls "" "$AUDIT" --no-color)
     if [[ -z $bad ]]; then
-        ok "no file writes or mutating syscalls (traced $(wc -l <<<"$trace") syscalls)"
+        ok "audit: no file writes or mutating syscalls"
     else
-        fail "mutating syscalls found:"
+        fail "audit: mutating syscalls found:"
+        printf '        %s\n' "$bad" | head -20
+    fi
+    bad=$(mutating_syscalls "$FIX/reports" "$AUDIT" --no-color --report "$FIX/reports/traced.html")
+    if [[ -z $bad ]]; then
+        ok "audit --report: writes only inside the report directory"
+    else
+        fail "audit --report: writes outside the report directory:"
         printf '        %s\n' "$bad" | head -20
     fi
 else
