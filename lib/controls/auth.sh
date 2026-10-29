@@ -14,6 +14,9 @@ register_control AUTH-1 medium "Password policy" fix_password_ageing \
 register_control AUTH-2 high "Password policy" fix_empty_passwords \
     "No accounts have empty or unshadowed passwords" \
     "An account with an empty password can be used by anyone with console or local access. A password hash left in world-readable /etc/passwd can be copied by any user and cracked offline."
+register_control AUTH-3 medium "Password policy" fix_password_quality \
+    "Password quality is enforced (pam_pwquality, minlen >= 14)" \
+    "Short passwords fall quickly to offline cracking. pam_pwquality rejects weak passwords at the moment they are set, which is the only point where the plaintext is available to check."
 
 login_defs_value() {
     local key=$1 line
@@ -81,5 +84,74 @@ This only affects NEW accounts. For existing ones run, per user: sudo chage --ma
     else
         report PASS AUTH-2 "No accounts have empty or unshadowed passwords" \
             "Every account uses /etc/shadow and none has an empty password field."
+    fi
+
+    check_password_quality
+}
+
+# PAM files where the "password" stack lives (Debian, then RHEL-style).
+readonly PAM_PASSWORD_FILES=(/etc/pam.d/common-password /etc/pam.d/system-auth /etc/pam.d/password-auth)
+
+# pwquality_minlen - effective minlen from pwquality.conf and its .conf.d
+# drop-ins (read in that order; later files override earlier ones).
+# Prints "VALUE FILE", or nothing if minlen is not set anywhere.
+pwquality_minlen() {
+    local f line val="" src=""
+    shopt -s nullglob
+    for f in /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line =~ ^[[:space:]]*minlen[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
+                val=${BASH_REMATCH[1]} src=$f
+            fi
+        done < "$f"
+    done
+    shopt -u nullglob
+    [[ -n $val ]] && printf '%s %s' "$val" "$src"
+}
+
+# AUTH-3: pam_pwquality must be in the PAM password stack with minlen >= 14
+# (CIS: "Ensure password creation requirements are configured").
+check_password_quality() {
+    local f line pam_file="" pam_line="" minlen="" src=""
+    for f in "${PAM_PASSWORD_FILES[@]}"; do
+        [[ -r $f ]] || continue
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line =~ ^[[:space:]]*password[[:space:]].*pam_pwquality\.so ]]; then
+                pam_file=$f pam_line=$line
+                break 2
+            fi
+        done < "$f"
+    done
+
+    if [[ -z $pam_file ]]; then
+        local fix
+        case $OS_FAMILY in
+            debian) fix="sudo apt install libpam-pwquality   (it adds pam_pwquality to /etc/pam.d/common-password)" ;;
+            rhel)   fix="pam_pwquality is part of the standard authselect profiles: check 'authselect current' and re-select your profile" ;;
+            *)      fix="Add 'password requisite pam_pwquality.so retry=3' to the PAM password stack." ;;
+        esac
+        fix+=$'\n'"Then set 'minlen = 14' in /etc/security/pwquality.conf.d/50-hardening.conf."
+        report FAIL AUTH-3 "${CTL_TITLE[AUTH-3]}" \
+            "pam_pwquality is not enabled in the PAM password stack (looked in ${PAM_PASSWORD_FILES[*]}), so only pam_unix's basic length check applies." \
+            "$fix"
+        return
+    fi
+
+    # A minlen= argument on the PAM line overrides the configuration files.
+    if [[ $pam_line =~ minlen=([0-9]+) ]]; then
+        minlen=${BASH_REMATCH[1]} src="the pam_pwquality line in $pam_file"
+    else
+        read -r minlen src < <(pwquality_minlen)
+        if [[ -z $minlen ]]; then
+            minlen=8 src="the libpwquality default"
+        fi
+    fi
+    if ((minlen >= 14)); then
+        report PASS AUTH-3 "${CTL_TITLE[AUTH-3]}" "pam_pwquality is enabled in $pam_file with minlen = $minlen (from $src)."
+    else
+        report FAIL AUTH-3 "${CTL_TITLE[AUTH-3]}" \
+            "pam_pwquality is enabled in $pam_file, but minlen is $minlen (from $src); it should be at least 14." \
+            "Set 'minlen = 14' in /etc/security/pwquality.conf.d/50-hardening.conf (or remove a smaller minlen= from the PAM line)."
     fi
 }

@@ -115,6 +115,9 @@ cp /etc/group "$FIX/group.bad"
 chmod 666 "$FIX/group.bad"                        # world-writable = bad
 chown nobody "$FIX/group.bad"
 
+printf 'password requisite pam_pwquality.so retry=3 minlen=14\npassword [success=1 default=ignore] pam_unix.so obscure use_authtok yescrypt\n' > "$FIX/common-password.good"
+printf 'password requisite pam_pwquality.so retry=3\npassword [success=1 default=ignore] pam_unix.so obscure yescrypt\n' > "$FIX/common-password.weak"
+
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "0";\n' > "$FIX/20auto-upgrades.off"
 printf 'ENABLED=yes\n' > "$FIX/ufw.conf.enabled"
 
@@ -122,13 +125,14 @@ printf 'ENABLED=yes\n' > "$FIX/ufw.conf.enabled"
 
 echo "Scenario: secure SSH config (drop-in overrides main file)"
 if [[ -e /etc/ssh/sshd_config ]]; then
-    out=$(run_in_ns "$FIX/secure/sshd_config:/etc/ssh/sshd_config $FIX/secure/sshd_config.d:/etc/ssh/sshd_config.d $FIX/login.defs.good:/etc/login.defs")
+    out=$(run_in_ns "$FIX/secure/sshd_config:/etc/ssh/sshd_config $FIX/secure/sshd_config.d:/etc/ssh/sshd_config.d $FIX/login.defs.good:/etc/login.defs $FIX/common-password.good:/etc/pam.d/common-password")
     expect "SSH-1 passes"  "$out" '^\[PASS\] SSH-1 '
     expect "SSH-2 passes"  "$out" '^\[PASS\] SSH-2 '
     expect "SSH-3 passes"  "$out" '^\[PASS\] SSH-3 '
     expect "SSH-4 passes"  "$out" '^\[PASS\] SSH-4 '
     expect "SSH-5 passes"  "$out" '^\[PASS\] SSH-5 '
     expect "AUTH-1 passes" "$out" '^\[PASS\] AUTH-1 '
+    expect "AUTH-3 passes with minlen=14 on the PAM line" "$out" '^\[PASS\] AUTH-3 '
 else
     echo "  (skipped: OpenSSH server not installed, nothing to bind-mount over)"
 fi
@@ -139,6 +143,7 @@ if [[ -e /etc/ssh/sshd_config ]]; then
     mounts+=" $FIX/insecure/sshd_config:/etc/ssh/sshd_config $FIX/insecure/sshd_config.d:/etc/ssh/sshd_config.d"
 fi
 [[ -e /etc/apt/apt.conf.d/20auto-upgrades ]] && mounts+=" $FIX/20auto-upgrades.off:/etc/apt/apt.conf.d/20auto-upgrades"
+[[ -e /etc/pam.d/common-password ]] && mounts+=" $FIX/common-password.weak:/etc/pam.d/common-password"
 out=$(run_in_ns "$mounts")
 if [[ -e /etc/ssh/sshd_config ]]; then
     expect "SSH-1 fails on PermitRootLogin yes"        "$out" '^\[FAIL\] SSH-1 '
@@ -150,6 +155,8 @@ if [[ -e /etc/ssh/sshd_config ]]; then
 fi
 expect "AUTH-1 fails on PASS_MAX_DAYS 99999"       "$out" "PASS_MAX_DAYS is '99999'"
 expect "AUTH-1 reports missing PASS_WARN_AGE"      "$out" "PASS_WARN_AGE is 'unset'"
+[[ -e /etc/pam.d/common-password ]] && \
+    expect "AUTH-3 fails on default minlen"        "$out" 'minlen is 8 \(from the libpwquality default\)'
 expect "AUTH-2 finds empty password"               "$out" 'EMPTY password.*nopass'
 expect "AUTH-2 finds unshadowed password"          "$out" 'world-readable /etc/passwd.*legacy'
 expect "FILE-2 fails on world-readable shadow"     "$out" '^\[FAIL\] FILE-2 '
