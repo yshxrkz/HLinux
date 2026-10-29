@@ -88,12 +88,18 @@ expect "refused when the user running it over SSH has no key" "$out" "logged in 
 check "nothing was changed by the refusals" "[[ \$(fingerprint) == '$before' ]]"
 
 echo "4. Harden everything"
+# Two quick runs first: back-to-back runs must get separate backup directories.
+"$TOOL" harden --yes --no-color --only FILE-2 >/dev/null 2>&1
+out=$("$TOOL" harden --yes --no-color --only FILE-4 2>&1)
+expect "a second run right after the first still works" "$out" '^  FILE-4  FAIL -> PASS$'
+check "each run has its own backup directory" "[[ \$(find /var/backups/harden-audit -mindepth 1 -maxdepth 1 -type d | wc -l) == 2 ]]"
+
 out=$("$TOOL" harden --yes --no-color --report "$REPORTS/harden.json" 2>&1)
 rc=$?
 printf '%s\n' "$out" > "$REPORTS/harden-output.txt"
 check "harden exits 0 (no FAIL left)" "(($rc == 0))"
 check "every fix was applied" "[[ \$(jq '[.hardening[] | select(.outcome != \"applied\")] | length' '$REPORTS/harden.json') == 0 ]]"
-check "14 fixes were applied" "[[ \$(jq '.hardening | length' '$REPORTS/harden.json') == 14 ]]"
+check "the other 12 fixes were applied" "[[ \$(jq '.hardening | length' '$REPORTS/harden.json') == 12 ]]"
 check "the report has the score before (low) and after (100)" \
     "[[ \$(jq '.score_before < 30 and .score == 100' '$REPORTS/harden.json') == true ]]"
 expect "the output shows before -> after" "$out" 'Hardening score: [0-9]+/100 \(grade F\) -> 100/100 \(grade A\)'
@@ -117,8 +123,10 @@ check "automatic upgrades are switched on" "apt-config dump | grep -q 'APT::Peri
 check "audit rules watch /etc/shadow" "grep -qx -- '-w /etc/shadow -p wa -k identity' /etc/audit/rules.d/50-hardening.rules"
 
 echo "6. Backups"
-backup=$(find /var/backups/harden-audit -mindepth 1 -maxdepth 1 -type d | head -n 1)
-check "one backup directory was created" "[[ \$(find /var/backups/harden-audit -mindepth 1 -maxdepth 1 -type d | wc -l) == 1 ]]"
+# The full run is the one that backed up login.defs (AUTH-1).
+backup=$(find /var/backups/harden-audit -path '*/etc/login.defs' -print -quit)
+backup=${backup%/etc/login.defs}
+check "the full run created a third backup directory" "[[ \$(find /var/backups/harden-audit -mindepth 1 -maxdepth 1 -type d | wc -l) == 3 ]]"
 check "the backup directory is private (700)" "[[ \$(stat -c %a '$backup') == 700 ]]"
 check "the original login.defs was backed up" "grep -Eq '^PASS_MAX_DAYS[[:space:]]+99999$' '$backup/etc/login.defs'"
 check "new files are listed for rollback" "grep -qx /etc/ssh/sshd_config.d/00-hardening.conf '$backup/created-files.txt'"

@@ -26,7 +26,7 @@ HARDEN_SKIP=""
 APPLY=0
 
 BACKUP_ROOT="${HARDEN_AUDIT_BACKUP_ROOT:-/var/backups/harden-audit}"
-BACKUP_DIR=""           # created on first use in apply mode
+BACKUP_DIR=""           # created on first use in apply mode: <root>/<timestamp>-XXXX
 HARDEN_LOGFILE=""       # command output of the run, inside BACKUP_DIR
 APT_UPDATED=0
 declare -A BACKED_UP=()
@@ -69,9 +69,11 @@ quote_cmd() {
 
 ensure_backup_dir() {
     [[ -n $BACKUP_DIR ]] && return 0
-    BACKUP_DIR="$BACKUP_ROOT/$(date '+%Y%m%d-%H%M%S')"
-    if ! mkdir -p "$BACKUP_ROOT" || ! chmod 700 "$BACKUP_ROOT" || ! mkdir -m 700 "$BACKUP_DIR"; then
-        echo "Cannot create backup directory $BACKUP_DIR - refusing to change anything." >&2
+    # Timestamped for humans, with a random suffix so two runs in the same
+    # second never collide. mktemp -d creates it with mode 700.
+    if ! mkdir -p "$BACKUP_ROOT" || ! chmod 700 "$BACKUP_ROOT" \
+        || ! BACKUP_DIR=$(mktemp -d "$BACKUP_ROOT/$(date '+%Y%m%d-%H%M%S')-XXXX"); then
+        echo "Cannot create a backup directory in $BACKUP_ROOT - refusing to change anything." >&2
         exit 2
     fi
     HARDEN_LOGFILE="$BACKUP_DIR/harden.log"
